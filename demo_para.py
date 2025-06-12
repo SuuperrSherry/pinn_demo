@@ -19,7 +19,14 @@ class PINN_ArcLength(nn.Module):
             layers.append(nn.Tanh())
         layers.append(nn.Linear(hidden_neurons, 2))  # Outputs: [x, p]
         self.network = nn.Sequential(*layers)
+
+        # Initialize weights
         self.init_weights()
+
+        # Learnable log-variance for automatic loss weighting
+        self.log_sigma_physics = nn.Parameter(torch.tensor(0.0))
+        self.log_sigma_arc = nn.Parameter(torch.tensor(0.0))
+        self.log_sigma_ic = nn.Parameter(torch.tensor(0.0))
 
     def init_weights(self):
         for m in self.modules():
@@ -64,16 +71,14 @@ def compute_loss(model, s_points, x0, p0):
     loss_ic = (x_start - x0) ** 2 + (p_start - p0) ** 2
     loss_ic = torch.mean(loss_ic)
 
-    # Combine all loss components
-    lambda_physics = 1.0
-    lambda_arclength = 1.0
-    lambda_ic = 10.0  # emphasize start point
-
-    total_loss = (lambda_physics * loss_physics +
-                  lambda_arclength * loss_arclength +
-                  lambda_ic * loss_ic)
-
+    # Combine loss with learnable log weights
+    total_loss = (
+        0.5 * torch.exp(-model.log_sigma_physics) * loss_physics + model.log_sigma_physics +
+        0.5 * torch.exp(-model.log_sigma_arc) * loss_arclength + model.log_sigma_arc +
+        0.5 * torch.exp(-model.log_sigma_ic) * loss_ic + model.log_sigma_ic
+    )
     return total_loss
+
 
 # Initialize model and optimizer
 model = PINN_ArcLength()
@@ -93,7 +98,7 @@ for step in range(3000):
     if step % 500 == 0:
         print(f"Step {step} - Loss: {loss.item():.6f}")
 
-# Predict using trained model
+# Predict
 x_pred, p_pred = model(s_points)
 x_pred = x_pred.detach().numpy()
 p_pred = p_pred.detach().numpy()
@@ -113,3 +118,13 @@ plt.legend()
 plt.grid(True)
 plt.tight_layout()
 plt.show()
+
+# Print learned loss weights
+sigma_physics = torch.exp(model.log_sigma_physics).item()
+sigma_arc = torch.exp(model.log_sigma_arc).item()
+sigma_ic = torch.exp(model.log_sigma_ic).item()
+
+print("\nLearned loss weights (w):")
+print(f"  w_physics     = {sigma_physics:.6f}")
+print(f"  w_arc_length  = {sigma_arc:.6f}")
+print(f"  w_initial     = {sigma_ic:.6f}")
