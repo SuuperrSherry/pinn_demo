@@ -79,52 +79,64 @@ def compute_loss(model, s_points, x0, p0):
     )
     return total_loss
 
+# Segment training function
+def segment_train(model, optimizer, s_start, x0, p0, step_size=0.2, segment_len=50, steps_per_segment=500):
+    s_segment = torch.linspace(s_start, s_start + step_size * (segment_len - 1), segment_len).view(-1, 1)
+    s_segment.requires_grad_(True)
+
+    for step in range(steps_per_segment):
+        optimizer.zero_grad()
+        loss = compute_loss(model, s_segment, x0, p0)
+        loss.backward()
+        optimizer.step()
+        if step % 100 == 0:
+            print(f"Segment Start s={s_start:.3f}, Step {step}, Loss={loss.item():.6f}")
+
+    with torch.no_grad():
+        x_last, p_last = model(s_segment[-1:])
+    return s_segment.detach(), x_last.detach(), p_last.detach()
+
+# Adapt step size based on Euclidean distance between segment endpoints
+def adaptive_step(x_prev, p_prev, x_new, p_new, base=1e-2, max_step=0.3):
+    delta = torch.sqrt((x_new - x_prev) ** 2 + (p_new - p_prev) ** 2)
+    return min(float(delta.item()) + base, max_step)
 
 # Initialize model and optimizer
 model = PINN_ArcLength()
+
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-# Define arc-length parameter (s or lambda)
-s_points = torch.linspace(-2, 2, 200).view(-1, 1)  # range from -2 to 2
+# Generate true path for comparison
 x0 = torch.tensor([[0.0]])
 p0 = torch.tensor([[0.0]])
+s_start = 0.0
+segments = 10
+step_size = 0.1
+all_x, all_p = [], []
 
-# Training loop
-for step in range(3000):
-    optimizer.zero_grad()
-    loss = compute_loss(model, s_points, x0, p0)
-    loss.backward()
-    optimizer.step()
-    if step % 500 == 0:
-        print(f"Step {step} - Loss: {loss.item():.6f}")
+# Train segments iteratively
+for seg in range(segments):
+    print(f"\n>> Training Segment {seg+1}")
+    s_segment, x0, p0 = segment_train(model, optimizer, s_start, x0, p0, step_size=step_size)
+    all_x.append(x0.item())
+    all_p.append(p0.item())
 
-# Predict
-x_pred, p_pred = model(s_points)
-x_pred = x_pred.detach().numpy()
-p_pred = p_pred.detach().numpy()
+    if seg > 0:
+        step_size = adaptive_step(torch.tensor([[all_x[-2]]]), torch.tensor([[all_p[-2]]]), x0, p0)
 
-# For comparison: true x = p^2
-p_true = np.linspace(-1.1, 1.1, 200)
-x_true = p_true**2
+    s_start = s_segment[-1].item()
 
 # Plot predicted vs true path
+# Plot final predicted vs true path
 plt.figure(figsize=(8, 6))
-plt.plot(x_pred, p_pred, 'b-', label='Predicted Path')
+plt.plot(all_x, all_p, 'bo-', label='Predicted Path')
+p_true = np.linspace(-1.1, 1.1, 200)
+x_true = p_true**2
 plt.plot(x_true, p_true, 'r--', label='True Path: x = p²')
 plt.xlabel("x")
 plt.ylabel("p")
-plt.title("PINN: Predicted vs True Path")
+plt.title("PINN: Segmented Adaptive Training Path")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
 plt.show()
-
-# Print learned loss weights
-sigma_physics = torch.exp(model.log_sigma_physics).item()
-sigma_arc = torch.exp(model.log_sigma_arc).item()
-sigma_ic = torch.exp(model.log_sigma_ic).item()
-
-print("\nLearned loss weights (w):")
-print(f"  w_physics     = {sigma_physics:.6f}")
-print(f"  w_arc_length  = {sigma_arc:.6f}")
-print(f"  w_initial     = {sigma_ic:.6f}")
