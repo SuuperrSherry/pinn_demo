@@ -49,37 +49,42 @@ def compute_derivatives(x, p, s):
     dp_ds = grad(p, s, grad_outputs=torch.ones_like(p), create_graph=True)[0]
     return dx_ds, dp_ds
 
+def compute_second_derivatives(x, p, s):
+    d2x_ds2 = grad(grad(x, s, torch.ones_like(x), create_graph=True)[0],
+                   s, torch.ones_like(x), create_graph=True)[0]
+    d2p_ds2 = grad(grad(p, s, torch.ones_like(p), create_graph=True)[0],
+                   s, torch.ones_like(p), create_graph=True)[0]
+    return d2x_ds2, d2p_ds2
+
 # Improved loss function with better weighting
 def compute_loss(model, s_points, x_ic, p_ic, s_ic=0.0):
     s_points.requires_grad_(True)
     x_pred, p_pred = model(s_points)
     dx_ds, dp_ds = compute_derivatives(x_pred, p_pred, s_points)
+    d2x_ds2, d2p_ds2 = compute_second_derivatives(x_pred, p_pred, s_points)
 
-    # Physics constraint
+    
     physics_residual = physics_equation(x_pred, p_pred)
     loss_physics = torch.mean(physics_residual ** 2)
+    loss_arclength = torch.mean((dx_ds**2 + dp_ds**2 - 1)**2)
+    loss_smooth = torch.mean(d2x_ds2**2 + d2p_ds2**2)  # <ADDED
 
-    # Arc length constraint
-    arclength_residual = dx_ds ** 2 + dp_ds ** 2 - 1
-    loss_arclength = torch.mean(arclength_residual ** 2)
-
-    # Initial condition
     s_ic_tensor = torch.tensor([[s_ic]], dtype=torch.float32, requires_grad=True)
     x_start, p_start = model(s_ic_tensor)
     loss_ic = torch.mean((x_start - x_ic)**2 + (p_start - p_ic)**2)
+    # ADD: monotonic penalty
+    monotonic_penalty = torch.mean(torch.relu(dp_ds)) ** 2
 
-    # Dynamic weighting
     total_loss = (
         0.5 * torch.exp(-model.log_sigma_physics) * loss_physics + model.log_sigma_physics +
         0.5 * torch.exp(-model.log_sigma_arc) * loss_arclength + model.log_sigma_arc +
-        0.5 * torch.exp(-model.log_sigma_ic) * loss_ic + model.log_sigma_ic
+        0.5 * torch.exp(-model.log_sigma_ic) * loss_ic + model.log_sigma_ic +
+        1.0 * monotonic_penalty  # added penalty to keep going down
     )
-
     return total_loss, loss_physics, loss_arclength, loss_ic
 
-
 # Segment training with local coordinate system
-def train_segment(s_start, s_end, x_start, p_start, num_points=20, epochs=1000):
+def train_segment(s_start, s_end, x_start, p_start, num_points=40, epochs=1000):
     # Create a new model for each segment to avoid catastrophic forgetting
     model = PINN_ArcLength()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -169,8 +174,7 @@ def path_following(start_point, total_length=2.0, base_step=0.2, max_segments=20
         
         print(f"End point: ({x_current:.3f}, {p_current:.3f})")
         
-        # Adaptive step size based on curvature (optional enhancement)
-        # For parabola x = p², curvature is higher near p = 0
+       #Adaptive step size
         curvature_factor = 1.0 / (1.0 + abs(p_current))
         base_step = max(0.1, min(0.3, 0.2 * curvature_factor))
     
