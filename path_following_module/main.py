@@ -1,13 +1,25 @@
+import numpy as np
 from config import set_random_seeds, Config
 from continuation import path_following
 from plots import plot_results, print_statistics
 
+
+
+
 def physics_equation(x, p):
-    return x - p**2
+    return (x**2)/4 + p**2 - 1
 
 def physics_fn_inv(p):
-    return p**2
+    return np.sqrt(4*(1 - p**2))
 
+#start_x, start_p = auto_start_point(physics_fn_inv)
+"""
+def physics_equation(x, p):
+    return (x**2)/4 + p**2 - 1
+
+def physics_fn_inv(p):
+    return np.sqrt(4*(1 - p**2))
+"""
 def main():
     set_random_seeds()
     print(f"Config: {Config.HIDDEN_LAYERS} layers, {Config.HIDDEN_NEURONS} neurons")

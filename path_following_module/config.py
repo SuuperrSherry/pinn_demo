@@ -13,6 +13,8 @@ class Config:
     MAX_STEP_SIZE = 0.3
     TORCH_SEED = 123
     NUMPY_SEED = 123
+    DIRECTION_PENALTY_WEIGHT = 0.01
+
 
 def set_random_seeds(torch_seed=Config.TORCH_SEED, numpy_seed=Config.NUMPY_SEED):
     import torch, numpy as np
