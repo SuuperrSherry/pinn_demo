@@ -11,4 +11,4 @@ pinn_pathfollowing/
 └── assets/                 # assets for visualization
     ├── strategy_comparison.png
     ├── loss_comparison.png
-    └── models/             # 保存的模型
+    └── models/             
