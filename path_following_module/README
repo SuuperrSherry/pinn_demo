@@ -11,4 +11,8 @@ pinn_pathfollowing/
 └── assets/                 # assets for visualization
     ├── strategy_comparison.png
     ├── loss_comparison.png
+<<<<<<< HEAD
     └── models/             
+=======
+    └── models/             
+>>>>>>> dd0d766ff712c6574bdb4b00578a90a05775ff4c
