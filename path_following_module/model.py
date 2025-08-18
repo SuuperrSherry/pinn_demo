@@ -17,6 +17,7 @@ class StreamlinedPINN(nn.Module):
         self.log_sigma_physics = nn.Parameter(torch.tensor(0.0))
         self.log_sigma_arc = nn.Parameter(torch.tensor(0.0))
         self.log_sigma_ic = nn.Parameter(torch.tensor(0.0))
+        self.log_sigma_dir = nn.Parameter(torch.tensor(0.0))  # for direction penalty
     
     def forward(self, s):
         output = self.network(s)
