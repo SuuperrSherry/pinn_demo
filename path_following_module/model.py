@@ -1,31 +1,55 @@
+# model.py
 import torch
 import torch.nn as nn
-from config import Config
+from typing import Tuple
 
-class StreamlinedPINN(nn.Module):
-    def __init__(self, input_dim=1, hidden_dim=32, output_dim=2, hidden_layers=3):
+class MLP(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int, hidden: int, layers: int, act: str):
         super().__init__()
-        
-        # build the neural network
-        layers = [nn.Linear(input_dim, hidden_dim), nn.Tanh()]
-        for _ in range(hidden_layers - 1):
-            layers += [nn.Linear(hidden_dim, hidden_dim), nn.Tanh()]
-        layers += [nn.Linear(hidden_dim, output_dim)]
-        self.network = nn.Sequential(*layers)
-        
-        # logarithmic scales for loss weights
-        self.log_sigma_physics = nn.Parameter(torch.tensor(0.0))
-        self.log_sigma_arc = nn.Parameter(torch.tensor(0.0))
-        self.log_sigma_ic = nn.Parameter(torch.tensor(0.0))
-        self.log_sigma_dir = nn.Parameter(torch.tensor(0.0))  # for direction penalty
-    
-    def forward(self, s):
-        output = self.network(s)
-        return output[:, [0]], output[:, [1]]  # x(s), p(s)
+        acts = {"tanh": nn.Tanh(), "relu": nn.ReLU(), "gelu": nn.GELU(), "silu": nn.SiLU()}
+        activation = acts.get(act, nn.Tanh())
+        net = []
+        last = in_dim
+        for _ in range(layers):
+            net += [nn.Linear(last, hidden), activation]
+            last = hidden
+        net += [nn.Linear(last, out_dim)]
+        self.net = nn.Sequential(*net)
+        self.apply(self._init)
 
-def save_model(model, filepath):
-    torch.save(model.state_dict(), filepath)
+    @staticmethod
+    def _init(m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight); nn.init.zeros_(m.bias)
 
-def load_model(model, filepath):
-    model.load_state_dict(torch.load(filepath))
-    return model
+    def forward(self, x):
+        return self.net(x)
+
+class PINN(nn.Module):
+    def __init__(self, nx: int, np_: int, hidden: int, layers: int, act: str):
+        super().__init__()
+        self.nx, self.np = nx, np_
+        self.mlp = MLP(1, nx + np_, hidden=hidden, layers=layers, act=act)
+        self.log_sigma = nn.ParameterDict({k: nn.Parameter(torch.zeros(1)) for k in ["phys","arc","ic","dir","smooth"]})
+
+    def forward(self, s: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        y = self.mlp(s)
+        x = y[:, :self.nx]
+        p = y[:, self.nx:self.nx+self.np]
+        return x, p
+
+    @staticmethod
+    def first_derivative(y: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        D = y.shape[1]
+        grads = [torch.autograd.grad(y[:,k].sum(), s, create_graph=True, retain_graph=True)[0] for k in range(D)]
+        return torch.cat(grads, dim=1)
+
+    @staticmethod
+    def second_derivative(y: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        D = y.shape[1]
+        d2 = []
+        for k in range(D):
+            dy = torch.autograd.grad(y[:,k].sum(), s, create_graph=True, retain_graph=True)[0]
+            d2y = torch.autograd.grad(dy.sum(), s, create_graph=True, retain_graph=True)[0]
+            d2.append(d2y)
+        return torch.cat(d2, dim=1)

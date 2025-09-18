@@ -2,8 +2,8 @@ from pathlib import Path
 from typing import Dict, List
 import torch
 import json
-from trainer import PINNTrainer
-from visualizer import Visualizer
+from train import PINNTrainer
+from viz import Visualizer
 from config import Config
 from bifurcation import analyze_bifurcations
 
