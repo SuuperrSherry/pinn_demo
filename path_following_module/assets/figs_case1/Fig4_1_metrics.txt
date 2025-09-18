@@ -1,3 +1,3 @@
-max|F| = 5.708e-02  (target ≤ 1.0e-03)
-MAE(x_pred, x_true_near) = 1.474e-02  (target ≤ 1.0e-02)
-mean arc-length error = 2.610e-03  (target ≤ 5.0e-03)
+max|F| = 7.151e-02  (target ≤ 1.0e-03)
+MAE(x_pred, x_true_near) = 1.456e-02  (target ≤ 1.0e-02)
+mean arc-length error = 7.285e-03  (target ≤ 5.0e-03)

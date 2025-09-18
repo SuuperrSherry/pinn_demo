@@ -1,166 +1,249 @@
 # losses.py
 import torch
-from typing import Dict, Optional
-from torch.autograd import grad
-from config import Config
+from typing import Dict, Optional, Tuple
 from model import PINN
 
+class LossComponents:
+    """损失组件计算器 - 保持你的原始损失函数设计"""
+    
+    @staticmethod
+    def physics_residual(physics_fn, x: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+        """物理残差损失 - 核心约束"""
+        residual = physics_fn(x, p)  # [B, nx]
+        return (residual**2).sum(dim=1).mean()
+    
+    @staticmethod
+    def arc_length_constraint(dy_ds: torch.Tensor, target_speed: float = 1.0) -> torch.Tensor:
+        """弧长约束 - 保持单位速度参数化"""
+        speed = torch.linalg.norm(dy_ds, dim=1)  # [B]
+        return ((speed - target_speed) ** 2).mean()
+    
+    @staticmethod
+    def initial_condition(y_at_s0: torch.Tensor, y0_target: torch.Tensor,
+                         t_at_s0: Optional[torch.Tensor] = None,
+                         t0_target: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """初始条件约束"""
+        position_loss = ((y_at_s0 - y0_target) ** 2).sum(dim=1).mean()
+        
+        tangent_loss = 0.0
+        if t_at_s0 is not None and t0_target is not None:
+            tangent_loss = ((t_at_s0 - t0_target) ** 2).sum(dim=1).mean()
+        
+        return position_loss + tangent_loss
+    
+    @staticmethod
+    def smoothness_regularization(d2y_ds2: torch.Tensor) -> torch.Tensor:
+        """平滑性正则化 - 控制曲率"""
+        return (d2y_ds2**2).sum(dim=1).mean()
 
-# ---------- 基础项 ----------
-def physics_residual(F, x, p) -> torch.Tensor:
-    r = F(x, p)                      # [B, nx]
-    return (r**2).sum(dim=1).mean()
+class DirectionConstraints:
+    """方向约束 - 你设计的方向一致性约束"""
+    
+    @staticmethod
+    def _get_sorted_indices(s: torch.Tensor) -> torch.Tensor:
+        """获取s的排序索引"""
+        return s.squeeze(-1).argsort()
+    
+    @staticmethod
+    def cosine_consistency(dy_ds: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        """余弦方向一致性 - 相邻切向量的余弦相似度"""
+        sorted_idx = DirectionConstraints._get_sorted_indices(s)
+        tangents = dy_ds.index_select(0, sorted_idx)
+        
+        # 归一化切向量
+        t_current = tangents[1:]  # [N-1, D]
+        t_previous = tangents[:-1]  # [N-1, D]
+        
+        t_current_norm = t_current / (t_current.norm(dim=1, keepdim=True) + 1e-8)
+        t_previous_norm = t_previous / (t_previous.norm(dim=1, keepdim=True) + 1e-8)
+        
+        # 余弦相似度损失
+        cosine_similarity = (t_current_norm * t_previous_norm).sum(dim=1)
+        return (1 - cosine_similarity).mean()
+    
+    @staticmethod
+    def forward_consistency(y: torch.Tensor, dy_ds: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        """前向一致性 - 确保切向量与实际位移方向一致"""
+        sorted_idx = DirectionConstraints._get_sorted_indices(s)
+        positions = y.index_select(0, sorted_idx)
+        tangents = dy_ds.index_select(0, sorted_idx)
+        
+        # 实际位移方向
+        actual_displacement = positions[1:] - positions[:-1]  # [N-1, D]
+        predicted_tangent = tangents[:-1]  # [N-1, D]
+        
+        # 归一化
+        actual_displacement_norm = actual_displacement / (actual_displacement.norm(dim=1, keepdim=True) + 1e-8)
+        predicted_tangent_norm = predicted_tangent / (predicted_tangent.norm(dim=1, keepdim=True) + 1e-8)
+        
+        # 一致性损失
+        consistency = (actual_displacement_norm * predicted_tangent_norm).sum(dim=1)
+        return (1 - consistency).mean()
+    
+    @staticmethod
+    def global_direction(dy_ds: torch.Tensor, nx: int, param_idx: int = 0, margin: float = 0.0) -> torch.Tensor:
+        """全局方向约束 - 对特定参数的导数施加方向约束"""
+        if nx >= dy_ds.shape[1]:
+            return torch.tensor(0.0, device=dy_ds.device)
+            
+        # 提取参数方向的导数
+        dp_ds = dy_ds[:, nx + param_idx]
+        
+        if margin > 0:
+            # 鼓励dp/ds >= margin
+            return torch.relu(margin - dp_ds).mean()
+        else:
+            # 鼓励dp/ds >= 0
+            return torch.relu(-dp_ds).mean()
 
-def arc_length_from_dyds(dyds: torch.Tensor, target_speed: float = 1.0) -> torch.Tensor:
-    spd = torch.linalg.norm(dyds, dim=1)          # [B]
-    return ((spd - target_speed) ** 2).mean()
+class AdaptiveWeighting:
+    """自适应权重 - Kendall方法和手动权重"""
+    
+    @staticmethod
+    def kendall_combination(losses: Dict[str, torch.Tensor], 
+                          alphas: Dict[str, float],
+                          log_sigma_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Kendall自适应权重组合"""
+        total_loss = torch.tensor(0.0, device=list(losses.values())[0].device)
+        
+        for loss_name, loss_value in losses.items():
+            if loss_value is None:
+                continue
+                
+            log_sigma = log_sigma_dict.get(loss_name, torch.tensor(0.0))
+            alpha = alphas.get(loss_name, 1.0)
+            
+            # Kendall公式: α * (0.5 * exp(-σ) * L + 0.5 * σ)
+            weighted_loss = alpha * (
+                0.5 * torch.exp(-log_sigma) * loss_value + 0.5 * log_sigma
+            )
+            total_loss = total_loss + weighted_loss
+        
+        return total_loss
+    
+    @staticmethod
+    def manual_combination(losses: Dict[str, torch.Tensor], 
+                         weights: Dict[str, float]) -> torch.Tensor:
+        """手动权重组合"""
+        total_loss = torch.tensor(0.0, device=list(losses.values())[0].device)
+        
+        for loss_name, loss_value in losses.items():
+            if loss_value is None:
+                continue
+                
+            weight = weights.get(loss_name, 1.0)
+            total_loss = total_loss + weight * loss_value
+        
+        return total_loss
 
-def smoothness(d2yds2: torch.Tensor) -> torch.Tensor:
-    return (d2yds2**2).sum(dim=1).mean()
-
-def initial_conditions(y_s0: torch.Tensor, y0: torch.Tensor,
-                       t_s0: Optional[torch.Tensor] = None,
-                       t0: Optional[torch.Tensor] = None) -> torch.Tensor:
-    Lp = ((y_s0 - y0) ** 2).sum(dim=1).mean()
-    Lt = 0.0
-    if (t_s0 is not None) and (t0 is not None):
-        Lt = ((t_s0 - t0) ** 2).sum(dim=1).mean()
-    return Lp + Lt
-
-# ---------- 方向约束 ----------
-def _sorted_idx(s: torch.Tensor):
-    return s.squeeze(-1).argsort()
-
-def dir_cosine(dyds: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-    idx = _sorted_idx(s); t = dyds.index_select(0, idx)
-    t1, t0 = t[1:], t[:-1]
-    t1 = t1 / (t1.norm(dim=1, keepdim=True) + 1e-8)
-    t0 = t0 / (t0.norm(dim=1, keepdim=True) + 1e-8)
-    return (1 - (t1*t0).sum(dim=1)).mean()
-
-def dir_forward(y: torch.Tensor, dyds: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-    idx = _sorted_idx(s)
-    ys = y.index_select(0, idx); ts = dyds.index_select(0, idx)
-    dy = ys[1:] - ys[:-1]; t = ts[:-1]
-    dy = dy / (dy.norm(dim=1, keepdim=True) + 1e-8)
-    t  = t  / (t.norm(dim=1, keepdim=True)  + 1e-8)
-    return (1 - (dy*t).sum(dim=1)).mean()
-
-def dir_global(dyds: torch.Tensor, nx: int, p_idx: int = 0, margin: float = 0.0) -> torch.Tensor:
-    # 对参数维 dp/ds 做“前向”约束（≥ margin）；nx 为 x 的维度，用来定位 p 的通道
-    dp = dyds[:, nx + p_idx]
-    if margin > 0:
-        return torch.relu(margin - dp).mean()
-    else:
-        return torch.relu(-dp).mean()
-
-# ---------- Kendall 组合 ----------
-def combine_kendall(losses: Dict[str, torch.Tensor], alphas: Dict[str, float], log_sigma) -> torch.Tensor:
-    total = 0.0
-    for k, L in losses.items():
-        if L is None: 
-            continue
-        s_k = log_sigma[k]              # nn.Parameter
-        a_k = alphas.get(k, 1.0)        # α 缩放
-        total = total + a_k * (0.5 * torch.exp(-s_k) * L + 0.5 * s_k)
-    return total
-
-# ---------- 统一组装：compute_loss ----------
-def compute_loss(model, s: torch.Tensor, y0: torch.Tensor, physics_fn, **kw):
+def compute_loss(model: PINN, s: torch.Tensor, y0: torch.Tensor, 
+                physics_fn, config) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
-    组装总损失：
-      L = Kendall( phys, arc, ic, smooth, dir )
-    其中 dir = w_cos * L_cos + w_fwd * L_fwd + w_g * L_global
-    - 读 Config.DIR_WEIGHTS 来组合方向项
-    - 读 Config.ALPHA / Config.USE_KENDALL 控制加权方式
+    计算总损失 - 保持你的原始损失函数设计
+    
+    Args:
+        model: PINN模型
+        s: 弧长参数点 [B, 1]
+        y0: 初始条件 [1, nx+np]
+        physics_fn: 物理方程函数
+        config: 配置对象
+        
+    Returns:
+        (total_loss, loss_components): 总损失和各组件损失
     """
-    device = Config.DEVICE
-    s = s.to(device).requires_grad_(True)
-    x, p = model(s)                                # x:[B,nx], p:[B,np]
-    y = torch.cat([x, p], dim=1)                   # y:[B, nx+np]
-
-    # 基础项
-    L_phys = physics_residual(physics_fn, x, p)
-
-    dyds   = PINN.first_derivative(y, s) 
-    L_arc = arc_length_from_dyds(dyds, target_speed=1.0)
-
-    # s=0 的输出用于 IC
-    y_s0 = model(torch.zeros(1, 1, device=device))
-    y_s0_cat = torch.cat([y_s0[0], y_s0[1]], dim=1) if isinstance(y_s0, tuple) else y_s0
-    L_ic = initial_conditions(y_s0_cat, y0)
-
-    d2yds2 = PINN.second_derivative(y, s)
-    L_smooth = smoothness(d2yds2)
-
-    # 方向项 = 三项组合
-    w = getattr(Config, "DIR_WEIGHTS", {"cos":0.0, "forward":0.0, "global":0.0})
-    L_dir_cos = dir_cosine(dyds, s) if w.get("cos", 0.0) > 0 else None
-    L_dir_fwd = dir_forward(y, dyds, s) if w.get("forward", 0.0) > 0 else None
-    L_dir_glb = dir_global(dyds, nx=x.shape[1],
-                           p_idx=getattr(Config, "DIR_GLOBAL_PARAM_IDX", 0),
-                           margin=getattr(Config, "DIR_GLOBAL_MARGIN", 0.0)) if w.get("global", 0.0) > 0 else None
-
-    # 将三个方向子项线性组合成一个 dir 原子项，再交给 Kendall/α
-    L_dir_raw = None
-    if any(v > 0 for v in w.values()):
-        parts = []
-        if L_dir_cos is not None: parts.append(w["cos"] * L_dir_cos)
-        if L_dir_fwd is not None: parts.append(w["forward"] * L_dir_fwd)
-        if L_dir_glb is not None: parts.append(w["global"] * L_dir_glb)
-        L_dir_raw = sum(parts)
-
-    losses = {
-        "phys": L_phys,
-        "arc": L_arc,
-        "ic": L_ic,
-        "smooth": L_smooth,
-        "dir": L_dir_raw
-    }
-
-
-    # 总损失：Kendall 或 直接加权和
-    if getattr(Config, "USE_KENDALL", False):
-        # 从 model.log_sigma[...] 读取每项的 log_sigma
-        log_sigma = {k: model.log_sigma[k] for k in losses.keys()}
-        total = combine_kendall(losses, getattr(Config, "ALPHA", {}), log_sigma)
-    else:
-        alphas = getattr(Config, "ALPHA", {})
-        total = sum(alphas.get(k, 1.0) * (L if L is not None else 0.0) for k, L in losses.items())
-
-
-    # losses.py（增加一个小工具）
-    def _as_tensor(x, device):
-        """把 float/None 统一成 tensor（标量）"""
-        if x is None:
+    device = s.device
+    s = s.requires_grad_(True)
+    
+    # 前向传播
+    x, p = model(s)  # x: [B, nx], p: [B, np]
+    y = torch.cat([x, p], dim=1)  # y: [B, nx+np]
+    
+    # === 基础损失组件 ===
+    
+    # 物理残差
+    physics_loss = LossComponents.physics_residual(physics_fn, x, p)
+    
+    # 弧长约束
+    dy_ds = PINN.compute_first_derivative(y, s)
+    arc_length_loss = LossComponents.arc_length_constraint(dy_ds, target_speed=1.0)
+    
+    # 初始条件
+    y_at_s0 = model(torch.zeros(1, 1, device=device))
+    y_s0_combined = torch.cat([y_at_s0[0], y_at_s0[1]], dim=1) if isinstance(y_at_s0, tuple) else y_at_s0
+    initial_condition_loss = LossComponents.initial_condition(y_s0_combined, y0)
+    
+    # 平滑性
+    d2y_ds2 = PINN.compute_second_derivative(y, s)
+    smoothness_loss = LossComponents.smoothness_regularization(d2y_ds2)
+    
+    # === 方向约束组合 ===
+    direction_weights = config.DIRECTION_WEIGHTS
+    direction_loss = None
+    
+    if any(w > 0 for w in direction_weights.values()):
+        direction_components = []
+        
+        if direction_weights.get("cosine", 0.0) > 0:
+            cosine_loss = DirectionConstraints.cosine_consistency(dy_ds, s)
+            direction_components.append(direction_weights["cosine"] * cosine_loss)
+        
+        if direction_weights.get("forward", 0.0) > 0:
+            forward_loss = DirectionConstraints.forward_consistency(y, dy_ds, s)
+            direction_components.append(direction_weights["forward"] * forward_loss)
+        
+        if direction_weights.get("global", 0.0) > 0:
+            global_loss = DirectionConstraints.global_direction(
+                dy_ds, 
+                nx=config.NX,
+                param_idx=config.DIRECTION_GLOBAL_PARAM_IDX,
+                margin=config.DIRECTION_GLOBAL_MARGIN
+            )
+            direction_components.append(direction_weights["global"] * global_loss)
+        
+        if direction_components:
+            direction_loss = sum(direction_components)
+    
+    # === 组装损失字典 ===
+    def _ensure_tensor(value, device):
+        """确保值是tensor标量"""
+        if value is None:
             return torch.zeros((), device=device)
-        if isinstance(x, torch.Tensor):
-            return x
-        return torch.tensor(x, dtype=torch.float32, device=device)
-        # —— 组合总损失（示意，保持你原来的公式）——
-    # 先把分量放进 dict
-    losses = {
-        "phys": L_phys,
-        "arc":  L_arc,
-        "ic":   L_ic,
-        "smooth": L_smooth if 'L_smooth' in locals() else 0.0,
-        "dir":  L_dir if 'L_dir' in locals() else 0.0,
+        if isinstance(value, torch.Tensor):
+            return value
+        return torch.tensor(value, dtype=torch.float32, device=device)
+    
+    individual_losses = {
+        "physics": physics_loss,
+        "arc_length": arc_length_loss,
+        "initial_condition": initial_condition_loss,
+        "smoothness": smoothness_loss,
+        "direction": direction_loss
     }
-
-    # 统一成 tensor，避免 float 与 tensor 混算/日志时报错
-    device = y.device if 'y' in locals() else s.device
-    for k, v in list(losses.items()):
-        losses[k] = _as_tensor(v, device)
-
-    # 你的总损失（Kendall/α 等）保持不变，这里示例：
-    total = combine_kendall(losses, alphas=Config.ALPHA, log_sigma=model.log_sigma)
-    # 若你还有其它加项，也同样用 _as_tensor 包一下再相加
-
-    # —— 返回日志用的标量（避免 float.detach 报错）——
-    comps = {}
-    for k, L in losses.items():
-        # 此处 L 一定是 tensor 了
-        comps[k] = float(L.detach().cpu().item())
-    comps["total"] = float(total.detach().cpu().item())
-
-    return total, comps
+    
+    # 确保所有损失都是tensor
+    for name, loss in list(individual_losses.items()):
+        individual_losses[name] = _ensure_tensor(loss, device)
+    
+    # === 总损失计算 ===
+    if config.USE_KENDALL:
+        # 使用Kendall自适应权重
+        total_loss = AdaptiveWeighting.kendall_combination(
+            losses=individual_losses,
+            alphas=config.LOSS_WEIGHTS,
+            log_sigma_dict=model.log_sigma
+        )
+    else:
+        # 使用手动权重
+        total_loss = AdaptiveWeighting.manual_combination(
+            losses=individual_losses,
+            weights=config.LOSS_WEIGHTS
+        )
+    
+    # === 返回结果 ===
+    loss_components = {}
+    for name, loss in individual_losses.items():
+        loss_components[name] = float(loss.detach().cpu().item())
+    
+    loss_components["total"] = float(total_loss.detach().cpu().item())
+    
+    return total_loss, loss_components

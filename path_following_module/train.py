@@ -2,175 +2,290 @@
 import os
 from typing import Tuple, Dict, List
 import torch
+import time
 from torch.amp import autocast, GradScaler
-
-from sampler import UniformSampler, AdaptiveSampler
 from config import Config, set_random_seeds
 from model import PINN
 from losses import compute_loss
-from bifurcation import export_branch_csv, SaddleNodeDetector
-
-
-def _sync_cfg_instance_to_class(cfg_obj):
-    """把实例 cfg 的公开属性同步到 Config 类属性，确保 losses 等模块读取一致。"""
-    for k in dir(cfg_obj):
-        if k.startswith("_"):
-            continue
-        try:
-            v = getattr(cfg_obj, k)
-        except Exception:
-            continue
-        if isinstance(v, (int, float, bool, str, tuple, list, dict, torch.device)):
-            setattr(Config, k, v)
-
+from sampler import SamplerFactory, AdaptiveSampler
+from bifurcation import BifurcationExporter, SaddleNodeDetector
 
 class PINNTrainer:
-    """稳健训练器：AMP(可选)+自适应采样+梯度裁剪+LR调度+CSV导出"""
-    def __init__(self, cfg: Config, F):
-        _sync_cfg_instance_to_class(cfg)
+    """PINN训练器 - 支持自动混合精度、自适应采样、梯度裁剪等"""
+
+    def train(self):
+        start_time = time.time()
+    
+        # ... 训练过程 ...
+    
+        training_time = time.time() - start_time
+        print(f"Training completed in {training_time:.1f}s")
+    
+        # 保存训练时间到历史记录
+        self.training_history.append({"training_time": training_time})
+    
+        return csv_path, self.training_history
+    
+    def __init__(self, config: Config, physics_fn):
+        self.config = config
+        self.physics_fn = physics_fn
+        
+        # 设置随机种子
         set_random_seeds()
-        self.cfg = cfg
-        self.F = F
-
-        # 设备 & AMP
-        self.device = getattr(cfg, "DEVICE", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-        self.scaler = GradScaler(
-            "cuda",
-            enabled=(self.device.type == "cuda" and bool(getattr(cfg, "AMP", False)))
+        
+        # 设备和AMP设置
+        self.device = config.DEVICE
+        self.use_amp = config.USE_AMP and (self.device.type == "cuda")
+        self.scaler = GradScaler("cuda", enabled=self.use_amp)
+        
+        # 初始化模型
+        self.model = PINN(
+            nx=config.NX,
+            np=config.NP,
+            hidden_size=config.HIDDEN_SIZE,
+            num_layers=config.NUM_LAYERS,
+            activation=config.ACTIVATION
+        ).to(self.device)
+        
+        # 初始化优化器和调度器
+        self.optimizer = torch.optim.Adam(
+            self.model.parameters(), 
+            lr=config.LEARNING_RATE
         )
-
-        # —— 采样器 —— #
-        S_max = float(getattr(cfg, "S_MAX", 7.0))
-        pts   = int(getattr(cfg, "POINTS_PER_SEGMENT", 80))
-
-        self.use_adaptive        = bool(getattr(cfg, "USE_ADAPTIVE", False))
-        self.adapt_warmup_iters  = int(getattr(cfg, "ADAPTIVE_WARMUP_ITERS", 800))
-        self.adapt_update_every  = int(getattr(cfg, "ADAPTIVE_UPDATE_EVERY", 200))
-        self.batch_points        = int(getattr(cfg, "BATCH_POINTS", pts))
-
-        self.uni_sampler = UniformSampler(S_max, self.device)
-        self.adp_sampler = AdaptiveSampler(
-            S_max, self.device,
-            grid_size=int(getattr(cfg, "ADAPTIVE_GRID_SIZE", 256)),
-            score_type=str(getattr(cfg, "ADAPTIVE_SCORE", "res")),  # "res" 或 "sigma"
-            mix=float(getattr(cfg, "ADAPTIVE_MIX", 0.5)),
-            temperature=float(getattr(cfg, "ADAPTIVE_TEMP", 0.5))
+        self.scheduler = torch.optim.lr_scheduler.StepLR(
+            self.optimizer,
+            step_size=config.LR_STEP_SIZE,
+            gamma=config.LR_GAMMA
         )
-
-        # 初始：均匀训练网格
-        self.s_train = self.uni_sampler.sample_grid(pts)
-
-        # 初值（y0 = [x0..., p0...]）
-        y0 = getattr(cfg, "Y0", [2.0, 0.0])
-        self.y0 = torch.tensor([y0], dtype=torch.float32, device=self.device)  # [1, nx+np]
-
-        # 模型
-        nx = int(getattr(cfg, "NX", 1)); np_ = int(getattr(cfg, "NP", 1))
-        hidden = int(getattr(cfg, "HIDDEN_NEURONS", 32))
-        layers = int(getattr(cfg, "HIDDEN_LAYERS", 3))
-        act = getattr(cfg, "ACT", "tanh")
-        self.net = PINN(nx=nx, np_=np_, hidden=hidden, layers=layers, act=act).to(self.device)
-
-        # 优化器 & 调度器
-        lr = float(getattr(cfg, "LEARNING_RATE", 1e-3))
-        self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
-        step_size = int(getattr(cfg, "LR_STEP_SIZE", 2000))
-        gamma = float(getattr(cfg, "LR_GAMMA", 0.3))
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.opt, step_size=step_size, gamma=gamma)
-
-        # 分叉探测器
-        eps_r = float(getattr(cfg, "EPS_R", 1e-3))
-        eps_sigma = float(getattr(cfg, "EPS_SIGMA", 1e-3))
-        eps_tau = float(getattr(cfg, "EPS_TAU", 1e-3))
-        window = int(getattr(cfg, "DEBOUNCE_WINDOW", 5))
-        self.det = SaddleNodeDetector(eps_r=eps_r, eps_sigma=eps_sigma, eps_tau=eps_tau, window=window)
-
-        # 训练控制
-        self.print_every = int(getattr(cfg, "PRINT_INTERVAL", 1000))
-        self.clip_max_norm = float(getattr(cfg, "CLIP_MAX_NORM", 1.0))
-
-    def _make_s_eval(self) -> torch.Tensor:
-        n_eval = int(getattr(self.cfg, "POINTS_PER_SEGMENT", 80))
-        return torch.linspace(
-            0.0, float(getattr(self.cfg, "S_MAX", Config.S_MAX)),
-            steps=n_eval, device=self.device
-        ).view(-1, 1)
-
+        
+        # 初始化采样器
+        self._setup_sampler()
+        
+        # 初始化分叉检测器
+        self.bifurcation_detector = SaddleNodeDetector(
+            residual_threshold=config.BIFURCATION_EPS_R,
+            sigma_threshold=config.BIFURCATION_EPS_SIGMA,
+            tau_threshold=config.BIFURCATION_EPS_TAU,
+            debounce_window=config.BIFURCATION_DEBOUNCE
+        )
+        
+        # 准备初始条件
+        self.initial_condition = torch.tensor(
+            [config.Y0], 
+            dtype=torch.float32, 
+            device=self.device
+        )
+        
+        # 训练状态
+        self.current_epoch = 0
+        self.training_history = []
+    
+    def _setup_sampler(self):
+        """设置采样器"""
+        config = self.config
+        
+        # 创建采样器
+        sampler_kwargs = {
+            "grid_size": config.ADAPTIVE_GRID_SIZE,
+            "score_type": config.ADAPTIVE_SCORE_TYPE,
+            "mix_ratio": config.ADAPTIVE_MIX_RATIO,
+            "temperature": config.ADAPTIVE_TEMPERATURE
+        }
+        
+        self.sampler = SamplerFactory.create_sampler(
+            strategy=config.SAMPLING_STRATEGY,
+            s_max=config.S_MAX,
+            device=self.device,
+            **sampler_kwargs
+        )
+        
+        # 初始训练网格
+        self.training_grid = self.sampler.sample_grid(config.BATCH_SIZE)
+        
+        # 自适应采样参数
+        self.use_adaptive = (config.SAMPLING_STRATEGY == "adaptive")
+        if self.use_adaptive:
+            self.adaptive_warmup = config.ADAPTIVE_WARMUP_ITERS
+            self.adaptive_update_freq = config.ADAPTIVE_UPDATE_EVERY
+    
+    def _update_sampling_grid(self):
+        """更新采样网格（自适应采样）"""
+        if not self.use_adaptive:
+            return
+            
+        if self.current_epoch < self.adaptive_warmup:
+            return
+            
+        # 周期性更新重要性分布
+        if ((self.current_epoch - self.adaptive_warmup) % 
+            self.adaptive_update_freq == 0):
+            
+            if hasattr(self.sampler, 'update_distribution'):
+                self.sampler.update_distribution(self.model, self.physics_fn)
+            
+            # 重新采样训练网格
+            self.training_grid = self.sampler.sample_grid(self.config.BATCH_SIZE)
+    
+    def _compute_training_loss(self) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """计算训练损失"""
+        with autocast("cuda", enabled=self.use_amp):
+            total_loss, loss_components = compute_loss(
+                model=self.model,
+                s=self.training_grid,
+                y0=self.initial_condition,
+                physics_fn=self.physics_fn,
+                config=self.config
+            )
+        
+        return total_loss, loss_components
+    
+    def _optimization_step(self, loss: torch.Tensor) -> float:
+        """执行一步优化"""
+        self.optimizer.zero_grad(set_to_none=True)
+        
+        if self.use_amp:
+            self.scaler.scale(loss).backward()
+            
+            # 梯度裁剪
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), 
+                max_norm=self.config.GRADIENT_CLIP_NORM
+            )
+            
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            loss.backward()
+            
+            # 梯度裁剪
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                max_norm=self.config.GRADIENT_CLIP_NORM
+            )
+            
+            self.optimizer.step()
+        
+        self.scheduler.step()
+        return float(grad_norm)
+    
+    def _log_training_progress(self, loss_components: Dict[str, float], 
+                              grad_norm: float):
+        """记录训练进度"""
+        if self.current_epoch % self.config.LOG_EVERY == 0 or \
+           self.current_epoch == self.config.EPOCHS - 1:
+            
+            # 添加训练信息
+            loss_components["grad_norm"] = grad_norm
+            loss_components["learning_rate"] = float(self.scheduler.get_last_lr()[0])
+            loss_components["s_min"] = float(self.training_grid.min().item())
+            loss_components["s_max"] = float(self.training_grid.max().item())
+            
+            # 打印日志
+            print(
+                f"Epoch {self.current_epoch:05d} | "
+                f"Total={loss_components.get('total', 0):.3e} | "
+                f"Phys={loss_components.get('physics', 0):.3e} | "
+                f"Arc={loss_components.get('arc_length', 0):.3e} | "
+                f"IC={loss_components.get('initial_condition', 0):.3e} | "
+                f"Smooth={loss_components.get('smoothness', 0):.3e} | "
+                f"Dir={loss_components.get('direction', 0):.3e} | "
+                f"Grad={grad_norm:.2e} | "
+                f"LR={loss_components['learning_rate']:.1e} | "
+                f"s∈[{loss_components['s_min']:.2f},{loss_components['s_max']:.2f}]"
+            )
+        
+        # 记录历史
+        self.training_history.append(loss_components)
+    
     def train(self) -> Tuple[str, List[Dict[str, float]]]:
-        cfg = self.cfg
-        history: List[Dict[str, float]] = []
-        iters = int(getattr(cfg, "EPOCHS", Config.STEPS))
-
-        for it in range(iters):
-            self.opt.zero_grad(set_to_none=True)
-
-            # —— 自适应采样：warm-up 后按周期刷新分布并重采样 —— #
-            if self.use_adaptive and it >= self.adapt_warmup_iters:
-                # 周期性更新重要性分布
-                if (it - self.adapt_warmup_iters) % self.adapt_update_every == 0:
-                    self.adp_sampler.update(self.net, self.F)
-                # 重采样训练网格（整网格或 mini-batch）
-                self.s_train = self.adp_sampler.sample_grid(self.batch_points)
-            # （均匀模式则保持初始 s_train 不变；如需每步均匀重采样可改为：
-            # else: self.s_train = self.uni_sampler.sample_grid(self.batch_points)）
-
-            # 计算损失（AMP）
-            with autocast("cuda", enabled=self.scaler.is_enabled()):
-                total, comps = compute_loss(
-                    model=self.net,
-                    s=self.s_train,
-                    y0=self.y0,
-                    physics_fn=self.F,
-                )
-
-            # 反传 + 梯度裁剪 + 更新
-            if self.scaler.is_enabled():
-                self.scaler.scale(total).backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=self.clip_max_norm)
-                self.scaler.step(self.opt)
-                self.scaler.update()
-            else:
-                total.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=self.clip_max_norm)
-                self.opt.step()
-
-            self.scheduler.step()
-
-            # 记录
-            comps = dict(comps)
-            comps["grad_norm"] = float(grad_norm)
-            comps["lr"] = float(self.scheduler.get_last_lr()[0])
-            # 方便观察采样范围
-            comps["s_min"] = float(self.s_train.min().item())
-            comps["s_max"] = float(self.s_train.max().item())
-            history.append(comps)
-
-            if it % self.print_every == 0 or it == iters - 1:
-                print(
-                    f"it={it:05d} | total={comps.get('total', 0):.3e} "
-                    f"| phys={comps.get('phys', 0):.3e} | arc={comps.get('arc', 0):.3e} "
-                    f"| ic={comps.get('ic', 0):.3e} | smooth={comps.get('smooth', 0):.3e} "
-                    f"| dir={comps.get('dir', 0):.3e} | grad={comps['grad_norm']:.2e} | lr={comps['lr']:.1e} "
-                    f"| s∈[{comps['s_min']:.2f},{comps['s_max']:.2f}]"
-                )
-
-        # 导出 CSV 供画图
-        s_export = self._make_s_eval()
-        out_dir = getattr(cfg, "OUT_DIR", "assets")
-        os.makedirs(os.path.join(out_dir, "tables"), exist_ok=True)
-        out_csv = os.path.join(out_dir, "tables", "branch.csv")
-
-        export_branch_csv(
-            self.F, self.net, s_export, out_csv,
-            nx=int(getattr(cfg, "NX", 1)),
-            np_=int(getattr(cfg, "NP", 1)),
-            detector=self.det
-        )
-        print(f"Saved CSV -> {out_csv}")
-        return out_csv, history
-
-    @torch.no_grad()
-    def evaluate_path(self, s_eval: torch.Tensor):
-        self.net.eval()
-        x, p = self.net(s_eval.to(self.device))
+        """
+        执行完整的训练过程
+        
+        Returns:
+            (csv_path, training_history): 导出的CSV路径和训练历史
+        """
+        print(f"Starting training for {self.config.EPOCHS} epochs...")
+        print(f"Device: {self.device}, AMP: {self.use_amp}, Sampling: {self.config.SAMPLING_STRATEGY}")
+        
+        self.model.train()
+        
+        for epoch in range(self.config.EPOCHS):
+            self.current_epoch = epoch
+            
+            # 更新采样网格（如果使用自适应采样）
+            self._update_sampling_grid()
+            
+            # 计算损失
+            total_loss, loss_components = self._compute_training_loss()
+            
+            # 优化步骤
+            grad_norm = self._optimization_step(total_loss)
+            
+            # 记录和日志
+            self._log_training_progress(loss_components, grad_norm)
+        
+        # 导出结果
+        csv_path = self._export_results()
+        
+        print(f"Training completed. Results saved to: {csv_path}")
+        return csv_path, self.training_history
+    
+    def _export_results(self) -> str:
+        """导出训练结果到CSV"""
+        # 准备评估网格
+        eval_grid = torch.linspace(
+            0.0, self.config.S_MAX,
+            steps=self.config.EXPORT_POINTS,
+            device=self.device
+        ).view(-1, 1)
+        
+        # 输出路径
+        output_dir = os.path.join(self.config.OUTPUT_DIR, "tables")
+        os.makedirs(output_dir, exist_ok=True)
+        csv_path = os.path.join(output_dir, "branch.csv")
+        
+        # 导出
+        self.model.eval()
+        with torch.no_grad():
+            BifurcationExporter.export_to_csv(
+                physics_fn=self.physics_fn,
+                model=self.model,
+                s_eval=eval_grid,
+                output_path=csv_path,
+                detector=self.bifurcation_detector
+            )
+        
+        return csv_path
+    
+    def evaluate_at_points(self, s_points: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        在指定点评估模型
+        
+        Args:
+            s_points: 评估点 [N, 1]
+            
+        Returns:
+            (x, p): 状态变量和参数
+        """
+        self.model.eval()
+        with torch.no_grad():
+            s_points = s_points.to(self.device)
+            x, p = self.model(s_points)
         return x.squeeze(), p.squeeze()
+    
+    def get_model_state(self) -> dict:
+        """获取模型状态字典"""
+        return {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "epoch": self.current_epoch,
+            "config": self.config
+        }
+    
+    def load_model_state(self, state_dict: dict):
+        """加载模型状态"""
+        self.model.load_state_dict(state_dict["model_state_dict"])
+        self.optimizer.load_state_dict(state_dict["optimizer_state_dict"])
+        self.scheduler.load_state_dict(state_dict["scheduler_state_dict"])
+        self.current_epoch = state_dict["epoch"]
