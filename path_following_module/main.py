@@ -1,18 +1,17 @@
 # main.py
 import os
+from typing import Dict
 from config import Config
 from train import PINNTrainer
 from physics import get_system
 from viz import Visualizer
+from auto_spawn import AutoSpawnDetector
 
 def run_case1_with_direction():
     """
     Case1: 鞍节点分叉 - 开启方向约束版本
     论文Fig.4.1系列图表
     """
-    import time
-    start_time = time.time()
-    
     print("Running Case1 with direction constraints...")
     
     # 获取物理系统
@@ -25,8 +24,6 @@ def run_case1_with_direction():
     # 训练
     trainer = PINNTrainer(config, physics_fn)
     csv_path, training_history = trainer.train()
-    
-    training_time = time.time() - start_time
     
     # 生成图表
     visualizer = Visualizer(config, output_dir="assets")
@@ -44,39 +41,14 @@ def run_case1_with_direction():
         csv_path, f"{output_dir}/Fig4_1c_arc_vs_s.png"
     )
     visualizer.plot_training_curves(
-        training_history, f"{output_dir}/training_curves.png",
-        title="Training losses"
+        training_history, f"{output_dir}/Fig4_1d_training_curves.png",
+        title="Fig.4.1(d) Training losses"
     )
     
-    # 计算指标
-    from bifurcation import compute_case1_metrics
-    
-    try:
-        metrics = compute_case1_metrics(csv_path, theory_fn)
-        
-        print("\n=== Case 1 Performance Metrics ===")
-        print(f"Max |F(x,p)|: {metrics['max_residual']:.2e}")
-        print(f"MAE vs Theory: {metrics['mae_theory']:.2e}")  
-        print(f"Mean Arc Error: {metrics['mean_arc_error']:.2e}")
-        print(f"Bifurcation Error: {metrics['bifurcation_error']:.2e}")
-        print(f"Training Time: {training_time:.1f}s")
-        
-        # 保存到文件
-        with open(f"{output_dir}/metrics_summary.txt", "w") as f:
-            f.write(f"Max |F(x,p)|: {metrics['max_residual']:.2e}\n")
-            f.write(f"MAE vs Theory: {metrics['mae_theory']:.2e}\n")
-            f.write(f"Mean Arc Error: {metrics['mean_arc_error']:.2e}\n")
-            f.write(f"Training Time: {training_time:.1f}s\n")
-            
-        print(f"Metrics saved to {output_dir}/metrics_summary.txt")
-        
-    except Exception as e:
-        print(f"Error computing metrics: {e}")
-        print("CSV file structure:")
-        import pandas as pd
-        df = pd.read_csv(csv_path)
-        print(f"Columns: {df.columns.tolist()}")
-        print(f"Shape: {df.shape}")
+    # 指标报告
+    visualizer.generate_case1_metrics_report(
+        csv_path, theory_fn, f"{output_dir}/Fig4_1_metrics.txt"
+    )
     
     print(f"Case1 (with direction) completed. Results in {output_dir}/")
     return csv_path, training_history
@@ -163,6 +135,62 @@ def run_case2():
     print(f"Case2 completed. Results in {output_dir}/")
     return csv_path, training_history
 
+def run_case2_with_autospawn():
+    """
+    Case2: 跨临界分叉 - 带自动派生版本
+    展示框架的自动分支检测和派生能力
+    """
+    print("\n" + "="*60)
+    print("Running Case2 with AUTO-SPAWN capability...")
+    print("="*60)
+    
+    # 获取物理系统
+    physics_fn, nx, np_, theory_fn = get_system("case2_2d")
+    
+    # 配置参数
+    config = Config()
+    config.setup_case2()
+    
+    # 创建训练器
+    trainer = PINNTrainer(config, physics_fn)
+    
+    # 使用自动派生训练
+    primary_csv, branch_results = trainer.train_with_autospawn()
+    
+    # 生成可视化
+    visualizer = Visualizer(config, output_dir="assets")
+    output_dir = "assets/figs_case2_autospawn"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 绘制自动派生结果
+    visualizer.plot_case2_autospawn_results(
+        branch_results,
+        f"{output_dir}/Fig_case2_autospawn_complete.png",
+        theory_fn
+    )
+    
+    # 生成性能报告
+    with open(f"{output_dir}/autospawn_report.txt", "w") as f:
+        f.write("Case 2: Auto-spawn Performance Report\n")
+        f.write("="*50 + "\n\n")
+        
+        for branch in branch_results:
+            f.write(f"Branch: {branch['name'].upper()}\n")
+            f.write(f"  CSV: {branch['csv_path']}\n")
+            f.write(f"  Initial condition: {branch['initial_condition']}\n")
+            
+            if 'spawn_point' in branch:
+                sp = branch['spawn_point']
+                f.write(f"  Spawn point: s={sp.s:.3f}, p={sp.p:.3f}\n")
+                f.write(f"  Deviation: {sp.deviation:.3f}\n")
+            
+            f.write("\n")
+    
+    print(f"\n✅ Case2 with auto-spawn completed!")
+    print(f"Results saved to {output_dir}/")
+    
+    return branch_results
+
 def run_case3():
     """
     Case3: Hopf分叉幅值流形
@@ -200,7 +228,125 @@ def run_case3():
     print(f"Case3 completed. Results in {output_dir}/")
     return csv_path, training_history
 
-def run_case4():
+def run_case2_comprehensive():
+    """运行Case2的完整实验，包括对比和指标计算"""
+    
+    # 1. 基线实验（无方向约束）
+    config_baseline = Config()
+    config_baseline.setup_case2()
+    config_baseline.DIRECTION_WEIGHTS = {"cosine": 0.0, "forward": 0.0, "global": 0.0}
+    config_baseline.LOSS_WEIGHTS["direction"] = 0.0
+    
+    # 2. 增强实验（有方向约束）
+    config_enhanced = Config()
+    config_enhanced.setup_case2()
+    
+    physics_fn, nx, np_, theory_fn = get_system("case2_2d")
+    
+    # 运行对比实验
+    results = {}
+    for name, config in [("baseline", config_baseline), ("enhanced", config_enhanced)]:
+        print(f"Running Case2 {name}...")
+        trainer = PINNTrainer(config, physics_fn)
+        csv_path, history = trainer.train()
+        
+        # 计算指标
+        from bifurcation import compute_case2_metrics
+        metrics = compute_case2_metrics(csv_path, theory_fn)
+        
+        results[name] = {
+            "csv_path": csv_path,
+            "metrics": metrics,
+            "history": history
+        }
+        
+        print(f"\n=== Case2 {name.title()} Results ===")
+        for metric_name, value in metrics.items():
+            print(f"{metric_name}: {value:.3e}")
+    
+    # 生成对比表格和图表
+    generate_comparison_table(results, "assets/case2_comparison.txt")
+    
+    # 生成可视化
+    visualizer = Visualizer(Config())
+    visualizer.plot_convergence_analysis(
+        [results["baseline"]["history"], results["enhanced"]["history"]],
+        ["Baseline", "Enhanced"],
+        "assets/case2_convergence_comparison.png"
+    )
+    
+    return results
+
+def generate_comparison_table(results: Dict, output_path: str):
+    """生成对比表格"""
+    with open(output_path, "w") as f:
+        f.write("Case2 Method Comparison\n")
+        f.write("=" * 50 + "\n")
+        
+        for method_name, data in results.items():
+            f.write(f"\n{method_name.upper()}:\n")
+            for metric, value in data["metrics"].items():
+                f.write(f"  {metric}: {value:.3e}\n")
+
+def run_all_cases_with_metrics():
+    """运行所有case并生成完整的指标报告"""
+    
+    all_results = {}
+    
+    # Case1
+    print("Running Case1 comprehensive...")
+    try:
+        case1_enhanced = run_case1_with_direction()
+        case1_baseline = run_case1_baseline()
+        all_results["case1"] = {
+            "enhanced": case1_enhanced,
+            "baseline": case1_baseline
+        }
+    except Exception as e:
+        print(f"Case1 failed: {e}")
+    
+    # Case2  
+    print("Running Case2 comprehensive...")
+    try:
+        case2_results = run_case2_comprehensive()
+        all_results["case2"] = case2_results
+    except Exception as e:
+        print(f"Case2 failed: {e}")
+    
+    # Case3
+    print("Running Case3...")
+    try:
+        case3_results = run_case3()
+        all_results["case3"] = case3_results
+    except Exception as e:
+        print(f"Case3 failed: {e}")
+    
+    # 生成综合报告
+    generate_final_report(all_results, "assets/comprehensive_results.txt")
+    
+    return all_results
+
+def generate_final_report(all_results: Dict, output_path: str):
+    """生成最终综合报告"""
+    with open(output_path, "w") as f:
+        f.write("PINN Bifurcation Analysis - Comprehensive Results\n")
+        f.write("=" * 60 + "\n")
+        
+        for case_name, case_data in all_results.items():
+            f.write(f"\n{case_name.upper()}:\n")
+            f.write("-" * 20 + "\n")
+            
+            if isinstance(case_data, dict) and "enhanced" in case_data:
+                # Case1格式
+                f.write("Enhanced (with direction):\n")
+                # 写入增强版指标
+                f.write("Baseline (no direction):\n")
+                # 写入基线指标
+            else:
+                # 其他case格式
+                f.write("Results recorded\n")
+            
+        f.write(f"\nReport generated: {output_path}\n")
     """
     Case4: 预留接口 - 添加新case的模板
     
@@ -251,6 +397,16 @@ def main():
     except Exception as e:
         print(f"Case1 baseline failed: {e}")
     '''
+    try:
+        run_case2_comprehensive()
+        print()
+    except Exception as e:
+        print(f"Case2 comprehensive failed: {e}")
+    try:
+        run_case2_with_autospawn()
+        print()
+    except Exception as e:
+        print(f"Case2 with auto-spawn failed: {e}") 
     try:
         run_case2()
         print()

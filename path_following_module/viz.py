@@ -2,7 +2,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, Dict, List
 from config import Config
 
 class PlotStyle:
@@ -166,7 +166,7 @@ class Visualizer:
         
         plt.xlabel("p")
         plt.ylabel("x")
-        plt.title("Learned (x,p) vs theory (stable solid / unstable dashed)")
+        plt.title("Fig.4.1(a) Learned (x,p) vs theory (stable solid / unstable dashed)")
         plt.legend()
         plt.tight_layout()
         plt.savefig(output_path, dpi=self.config.FIG_DPI)
@@ -337,7 +337,110 @@ class Visualizer:
         plt.tight_layout()
         plt.savefig(output_path, dpi=self.config.FIG_DPI)
         plt.close()
+    def plot_case2_autospawn_results(self, branch_results: List[Dict], 
+                                output_path: str, theory_fn: Callable):
+        """绘制Case2自动派生结果"""
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
+        # 子图1: 分岔图主结果
+        ax1 = axes[0, 0]
+    
+        # 理论分支
+        p_theory = np.linspace(-1.5, 1.5, 300)
+        ax1.plot(p_theory, np.zeros_like(p_theory), 'k--', alpha=0.3, label='Theory: x=0')
+        ax1.plot(p_theory, p_theory, 'k--', alpha=0.3, label='Theory: x=p')
+    
+        # 绘制每个分支
+        colors = ['blue', 'red', 'green']
+        for i, branch_data in enumerate(branch_results):
+            df = pd.read_csv(branch_data['csv_path'])
+            p_data = df['p_0'].values
+            x_data = df['x_0'].values
+        
+            label = branch_data['name'].capitalize()
+            ax1.plot(p_data, x_data, '-', color=colors[i], 
+                    label=label, linewidth=2, alpha=0.8)
+        
+            # 标记初始点
+            y0 = branch_data['initial_condition']
+            ax1.plot(y0[-1], y0[0], 'o', color=colors[i], markersize=8)
+    
+        # 标记分岔点
+        ax1.plot(0, 0, 'ko', markersize=10, label='Bifurcation')
+    
+        ax1.set_xlabel('Parameter p')
+        ax1.set_ylabel('State x')
+        ax1.set_title('Transcritical Bifurcation with Auto-spawn')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_xlim(-1.5, 1.5)
+        ax1.set_ylim(-1.0, 1.5)
+    
+        # 子图2: 物理残差
+        ax2 = axes[0, 1]
+        for i, branch_data in enumerate(branch_results):
+            df = pd.read_csv(branch_data['csv_path'])
+            s_data = df['s'].values
+            res_data = df['res'].values if 'res' in df.columns else df['residual'].values
+        
+            ax2.semilogy(s_data, np.abs(res_data), '-', 
+                        color=colors[i], label=branch_data['name'].capitalize())
+    
+        ax2.set_xlabel('Arc length s')
+        ax2.set_ylabel('Physics residual')
+        ax2.set_title('Residual Evolution')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+    
+        # 子图3: 切向量一致性
+        ax3 = axes[1, 0]
+        for i, branch_data in enumerate(branch_results):
+            df = pd.read_csv(branch_data['csv_path'])
+            if 'tangent_cos' in df.columns:
+                s_data = df['s'].values
+                cos_data = df['tangent_cos'].values
+            
+                ax3.plot(s_data, cos_data, '-', color=colors[i], 
+                        label=branch_data['name'].capitalize(), alpha=0.7)
+    
+        ax3.axhline(y=0.7, color='red', linestyle='--', alpha=0.3, label='Threshold')
+        ax3.set_xlabel('Arc length s')
+        ax3.set_ylabel('cos(t_i, t_{i-1})')
+        ax3.set_title('Tangent Consistency (Spawn Trigger)')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+    
+        # 子图4: 性能指标表格
+        ax4 = axes[1, 1]
+        ax4.axis('tight')
+        ax4.axis('off')
+    
+        # 计算指标
+        metrics_data = []
+        for branch_data in enumerate(branch_results):
+            df = pd.read_csv(branch_data['csv_path'])
+            metrics = {
+                'Branch': branch_data['name'].capitalize(),
+                'Points': len(df),
+                'Max |F|': f"{df['res'].max():.2e}" if 'res' in df.columns else 'N/A',
+                'Mean arc err': f"{df['arc_err'].mean():.2e}" if 'arc_err' in df.columns else 'N/A'
+            }
+            metrics_data.append(list(metrics.values()))
+    
+        table = ax4.table(cellText=metrics_data,
+                          colLabels=['Branch', 'Points', 'Max |F|', 'Mean arc err'],
+                          loc='center',
+                          cellLoc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 1.5)
+        ax4.set_title('Performance Metrics')
+    
+        plt.suptitle('Case 2: Transcritical Bifurcation with Auto-spawn Framework', 
+                fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=self.config.FIG_DPI)
+        plt.close() 
     # ========= Case 3: Hopf分叉 =========
     
     def plot_case3_amplitude_curve(self, csv_path: str, output_path: str, theory_fn: Callable):
@@ -426,3 +529,42 @@ class Visualizer:
     def plot_arcerr_vs_s(self, csv_path: str, output_path: str):
         """兼容性别名"""
         self.plot_arc_length_error_vs_s(csv_path, output_path)
+    
+    # ========= 新增：方法对比和分析功能 =========
+    
+    def plot_method_comparison(self, results_dict: Dict, output_path: str):
+        """绘制方法对比图"""
+        methods = list(results_dict.keys())
+        metrics = ["max_residual", "mean_branch_distance", "stability_accuracy"]
+        
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        
+        for i, metric in enumerate(metrics):
+            if all(metric in results_dict[method]["metrics"] for method in methods):
+                values = [results_dict[method]["metrics"][metric] for method in methods]
+                axes[i].bar(methods, values)
+                axes[i].set_title(metric.replace("_", " ").title())
+                if 'residual' in metric:
+                    axes[i].set_yscale('log')
+        
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=self.config.FIG_DPI)
+        plt.close()
+    
+    def plot_convergence_analysis(self, history_list: list, labels: list, output_path: str):
+        """绘制多个方法的收敛对比"""
+        plt.figure(figsize=(10, 6))
+        
+        for history, label in zip(history_list, labels):
+            iterations = range(len(history))
+            total_losses = [h["total"] for h in history]
+            plt.semilogy(iterations, total_losses, label=label, linewidth=2)
+        
+        plt.xlabel("Iteration")
+        plt.ylabel("Total Loss")
+        plt.title("Training Convergence Comparison")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=self.config.FIG_DPI)
+        plt.close()

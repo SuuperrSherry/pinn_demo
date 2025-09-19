@@ -3,7 +3,9 @@ import os
 from typing import Tuple, Dict, List
 import torch
 import time
+import pandas as pd  # 添加这行
 from torch.amp import autocast, GradScaler
+
 from config import Config, set_random_seeds
 from model import PINN
 from losses import compute_loss
@@ -12,19 +14,6 @@ from bifurcation import BifurcationExporter, SaddleNodeDetector
 
 class PINNTrainer:
     """PINN训练器 - 支持自动混合精度、自适应采样、梯度裁剪等"""
-
-    def train(self):
-        start_time = time.time()
-    
-        # ... 训练过程 ...
-    
-        training_time = time.time() - start_time
-        print(f"Training completed in {training_time:.1f}s")
-    
-        # 保存训练时间到历史记录
-        self.training_history.append({"training_time": training_time})
-    
-        return csv_path, self.training_history
     
     def __init__(self, config: Config, physics_fn):
         self.config = config
@@ -76,9 +65,15 @@ class PINNTrainer:
             device=self.device
         )
         
-        # 训练状态
+        # 训练状态和统计
         self.current_epoch = 0
         self.training_history = []
+        self.training_stats = {
+            "convergence_epoch": None,
+            "final_loss": None,
+            "gradient_norms": [],
+            "loss_plateau_detection": []
+        }
     
     def _setup_sampler(self):
         """设置采样器"""
@@ -107,6 +102,42 @@ class PINNTrainer:
         if self.use_adaptive:
             self.adaptive_warmup = config.ADAPTIVE_WARMUP_ITERS
             self.adaptive_update_freq = config.ADAPTIVE_UPDATE_EVERY
+    
+    def _detect_convergence(self, current_loss, tolerance=1e-6, window=100):
+        """检测训练收敛"""
+        if len(self.training_history) < window:
+            return False
+        
+        recent_losses = [h['total'] for h in self.training_history[-window:]]
+        loss_change = abs(max(recent_losses) - min(recent_losses))
+        
+        if loss_change < tolerance and self.training_stats["convergence_epoch"] is None:
+            self.training_stats["convergence_epoch"] = self.current_epoch
+            return True
+        return False
+    
+    def run_ablation_study(self, baseline_config):
+        """运行消融实验"""
+        results = {}
+        
+        # 基线实验
+        baseline_trainer = PINNTrainer(baseline_config, self.physics_fn)
+        baseline_csv, baseline_history = baseline_trainer.train()
+        results["baseline"] = {
+            "csv_path": baseline_csv,
+            "final_loss": baseline_history[-1]["total"],
+            "convergence_epoch": baseline_trainer.training_stats["convergence_epoch"]
+        }
+        
+        # 当前方法实验
+        current_csv, current_history = self.train()
+        results["current"] = {
+            "csv_path": current_csv,
+            "final_loss": current_history[-1]["total"],
+            "convergence_epoch": self.training_stats["convergence_epoch"]
+        }
+        
+        return results
     
     def _update_sampling_grid(self):
         """更新采样网格（自适应采样）"""
@@ -196,6 +227,120 @@ class PINNTrainer:
         
         # 记录历史
         self.training_history.append(loss_components)
+    # 在 train.py 的 PINNTrainer 类中添加
+
+    def train_with_autospawn(self, spawn_configs: List[Dict] = None) -> Tuple[str, List[Dict]]:
+        """
+        带自动派生的训练 - Case2专用
+    
+        Args:
+            spawn_configs: 预定义的派生配置（可选）
+        
+        Returns:
+            (primary_csv, branch_results): 主分支CSV路径和所有分支结果
+        """
+        print("=" * 60)
+        print("Starting PRIMARY BRANCH training...")
+        print("=" * 60)
+    
+        # 训练主分支
+        primary_csv, primary_history = self.train()
+    
+        # 检测分支点
+        from auto_spawn import AutoSpawnDetector
+        detector = AutoSpawnDetector()
+    
+        df_primary = pd.read_csv(primary_csv)
+        branch_points = detector.detect_branch_points(df_primary)
+    
+        branch_results = [{
+            'name': 'primary',
+            'csv_path': primary_csv,
+            'history': primary_history,
+            'initial_condition': self.config.Y0
+        }]
+    
+        # 如果检测到分支点，进行自动派生
+        if branch_points:
+            print(f"\n🎯 Detected {len(branch_points)} potential branch points")
+        
+            # 选择最显著的分支点
+            best_branch = max(branch_points, key=lambda bp: bp.deviation)
+            print(f"📍 Best branch point at s={best_branch.s:.3f}, p={best_branch.p:.3f}")
+        
+            # 生成派生配置
+            spawn_config = self._generate_spawn_config(best_branch)
+        
+        # 训练派生分支
+            print("\n" + "=" * 60)
+            print("Starting SPAWNED BRANCH training...")
+            print("=" * 60)
+        
+            spawned_csv, spawned_history = self._train_spawned_branch(spawn_config)
+        
+            branch_results.append({
+                'name': 'spawned',
+                'csv_path': spawned_csv,
+                'history': spawned_history,
+                'initial_condition': spawn_config['initial_condition'],
+                'spawn_point': best_branch
+            })
+    
+        return primary_csv, branch_results
+
+    def _generate_spawn_config(self, branch_point) -> Dict:
+        """生成派生分支的配置"""
+        # 在分支点附近生成新的初始条件
+        epsilon = 0.01
+    
+        # 垂直于当前切向的方向
+        if len(branch_point.tangent) >= 3:
+            perpendicular = np.array([
+                -branch_point.tangent[1],
+                branch_point.tangent[0],
+                0.0
+            ])
+        else:
+            perpendicular = np.array([0.0, 1.0])
+    
+        perpendicular = perpendicular[:self.config.NX + self.config.NP]
+        perpendicular = perpendicular / (np.linalg.norm(perpendicular) + 1e-8)
+    
+        # 新的初始点
+        new_x = branch_point.x + epsilon * perpendicular[:self.config.NX]
+        new_p = branch_point.p + epsilon * perpendicular[-1] if self.config.NP == 1 else branch_point.p
+    
+        new_y0 = np.concatenate([new_x, [new_p]])
+    
+        return {
+            'initial_condition': new_y0.tolist(),
+            'spawn_s': branch_point.s,
+            'perpendicular': perpendicular
+        }
+
+    def _train_spawned_branch(self, spawn_config: Dict) -> Tuple[str, List]:
+        """训练派生分支"""
+        # 创建新的训练器实例
+        spawned_config = Config()
+        spawned_config.setup_case2()  # 使用Case2配置
+        spawned_config.Y0 = spawn_config['initial_condition']
+        spawned_config.S_MAX = 5.0  # 较短的派生分支
+    
+        # 减少方向约束（派生分支方向变化大）
+        spawned_config.DIRECTION_WEIGHTS = {"cosine": 0.0, "forward": 0.05, "global": 0.0}
+    
+        # 创建新训练器
+        spawned_trainer = PINNTrainer(spawned_config, self.physics_fn)
+    
+        # 训练
+        csv_path, history = spawned_trainer.train()
+    
+        # 重命名输出文件
+        import shutil
+        spawned_csv = csv_path.replace('branch.csv', 'branch_spawned.csv')
+        shutil.move(csv_path, spawned_csv)
+    
+        return spawned_csv, history
     
     def train(self) -> Tuple[str, List[Dict[str, float]]]:
         """
