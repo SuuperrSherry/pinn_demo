@@ -2,6 +2,7 @@
 import torch
 from typing import Dict, Optional, Tuple
 from model import PINN
+from config import Config
 
 class LossComponents:
     """损失组件计算器 - 保持你的原始损失函数设计"""
@@ -120,6 +121,15 @@ class AdaptiveWeighting:
             total_loss = total_loss + weighted_loss
         
         return total_loss
+    # === 仅当 2D 嵌入时，轻微惩罚 x_1，防止蓝线漂起 ===
+    w_embed = float(Config.LOSS_WEIGHTS.get("embed_collapse", 0.0))
+    if w_embed > 0.0:
+        x_pred, p_pred = model(s)           # [N, nx], [N, np]
+        if x_pred.shape[1] >= 2:            # 仅 2D 时启用
+            embed_penalty = x_pred[:, 1].abs().mean()
+            loss_total = loss_total + w_embed * embed_penalty
+            loss_dict["embed_collapse"] = float((w_embed * embed_penalty).item())
+
     
     @staticmethod
     def manual_combination(losses: Dict[str, torch.Tensor], 

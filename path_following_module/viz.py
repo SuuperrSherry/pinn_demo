@@ -1,19 +1,15 @@
-# viz.py
-import matplotlib.pyplot as plt
+# viz.py — minimal, paper-ready
+import os
+from typing import Callable, Tuple, Dict, List
 import numpy as np
 import pandas as pd
-from typing import Callable, Optional, Tuple, Dict, List
+import matplotlib.pyplot as plt
 from config import Config
 
+# ---------------- Basic style & IO ----------------
 class PlotStyle:
-    """统一的绘图样式管理"""
-    
     def __init__(self, config: Config):
         self.config = config
-        self._setup_matplotlib_style()
-    
-    def _setup_matplotlib_style(self):
-        """设置matplotlib全局样式"""
         plt.rcParams.update({
             "figure.dpi": self.config.FIG_DPI,
             "font.size": self.config.FONT_SIZE,
@@ -23,548 +19,313 @@ class PlotStyle:
             "lines.linewidth": self.config.LINE_WIDTH,
             "axes.grid": True,
             "grid.alpha": 0.3,
-            "figure.autolayout": True
+            "figure.autolayout": True,
         })
 
 class DataLoader:
-    """CSV数据加载和预处理"""
-    
     @staticmethod
     def load_branch_data(csv_path: str) -> pd.DataFrame:
-        """加载分支数据CSV"""
         return pd.read_csv(csv_path)
-    
-    @staticmethod
-    def find_column(df: pd.DataFrame, candidates: list) -> str:
-        """在DataFrame中查找合适的列名"""
-        for candidate in candidates:
-            if candidate in df.columns:
-                return candidate
-        raise KeyError(f"None of {candidates} found in columns: {list(df.columns)}")
 
+    @staticmethod
+    def find_column(df: pd.DataFrame, candidates: List[str]) -> str:
+        for c in candidates:
+            if c in df.columns:
+                return c
+        raise KeyError(f"None of {candidates} in {list(df.columns)}")
+
+# ---------------- Visualizer ----------------
 class Visualizer:
-    """可视化器 - 生成论文级别的图表"""
-    
     def __init__(self, config: Config, output_dir: str = "assets"):
         self.config = config
         self.output_dir = output_dir
         self.style = PlotStyle(config)
-    
-    # ========= 通用绘图函数 =========
-    
-    def plot_training_curves(self, history: list, output_path: str, 
-                           title: str = "Training losses"):
-        """绘制训练曲线"""
+
+    # ===== Common small plots =====
+    def plot_training_curves(self, history: List[Dict], output_path: str, title: str = "Training losses"):
         if not history:
             return
-            
-        iterations = np.arange(1, len(history) + 1)
+        it = np.arange(1, len(history) + 1)
         loss_names = ["total", "physics", "arc_length", "initial_condition", "smoothness", "direction"]
-        
         plt.figure(figsize=(7.0, 5.0))
-        
-        for loss_name in loss_names:
-            if loss_name in history[0]:
-                values = [h[loss_name] for h in history]
-                plt.semilogy(iterations, values, label=loss_name)
-        
-        plt.xlabel("Iteration")
-        plt.ylabel("Loss")
-        plt.title(title)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
-        plt.close()
-    
+        for name in loss_names:
+            if name in history[0]:
+                vals = [h[name] for h in history]
+                plt.semilogy(it, vals, label=name)
+        plt.xlabel("Iteration"); plt.ylabel("Loss"); plt.title(title)
+        plt.legend(); plt.tight_layout()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path, dpi=self.config.FIG_DPI); plt.close()
+
     def plot_residual_vs_s(self, csv_path: str, output_path: str):
-        """物理残差随弧长参数变化"""
         df = DataLoader.load_branch_data(csv_path)
         s_col = DataLoader.find_column(df, ["s"])
-        residual_col = DataLoader.find_column(df, ["res", "residual"])
-        
+        r_col = DataLoader.find_column(df, ["res", "residual"])
         plt.figure(figsize=(6.6, 5.0))
-        plt.semilogy(df[s_col], np.abs(df[residual_col]), "-", color="#1f77b4")
-        plt.xlabel("s")
-        plt.ylabel("|F(x,p)|")
-        plt.title("Physics residual vs s")
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
-        plt.close()
-    
+        plt.semilogy(df[s_col], np.abs(df[r_col]), "-")
+        plt.xlabel("s"); plt.ylabel("|F(x,p)|"); plt.title("Physics residual vs s")
+        plt.tight_layout(); os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path, dpi=self.config.FIG_DPI); plt.close()
+
     def plot_arc_length_error_vs_s(self, csv_path: str, output_path: str):
-        """弧长一致性误差"""
         df = DataLoader.load_branch_data(csv_path)
         s_col = DataLoader.find_column(df, ["s"])
-        
         if "arc_err" not in df.columns:
-            raise KeyError("Column 'arc_err' not found in CSV")
-        
+            raise KeyError("Column 'arc_err' not found")
         plt.figure(figsize=(6.6, 5.0))
-        plt.plot(df[s_col], df["arc_err"], "-", color="#1f77b4")
-        plt.xlabel("s")
-        plt.ylabel("(||y'|| - 1)²")
-        plt.title("Arc-length consistency vs s")
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
-        plt.close()
-    
-    # ========= Case 1: 鞍节点分叉 =========
-    
-    def plot_case1_bifurcation_diagram(self, csv_path: str, output_path: str, 
-                                     theory_fn: Callable, eps_residual: float = 1e-3):
-        """
-        Case1论文级p-x图：稳定=实线，不稳定=虚线，误差带，分叉点标记
-        保持与原代码完全一致的图表效果
-        """
+        plt.plot(df[s_col], df["arc_err"], "-")
+        plt.xlabel("s"); plt.ylabel("(||y'|| - 1)²"); plt.title("Arc-length consistency vs s")
+        plt.tight_layout(); os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path, dpi=self.config.FIG_DPI); plt.close()
+
+    # ===== Case 1: Saddle-node =====
+    def plot_case1_bifurcation_diagram(self, csv_path: str, output_path: str,
+                                       theory_fn: Callable, eps_residual: float = 1e-3):
         df = DataLoader.load_branch_data(csv_path)
-        
-        # 数据提取
-        p_col = DataLoader.find_column(df, ["p", "p1", "p_0", "p0"])
-        x_col = DataLoader.find_column(df, ["x", "x1", "x_0", "x0"])
-        stability_col = "stable" if "stable" in df.columns else None
-        
-        p_data = df[p_col].values
-        x_data = df[x_col].values
-        stability = df[stability_col].astype(bool).values if stability_col else (x_data < 0)
-        
-        # 理论解
-        x_stable_theory, x_unstable_theory = theory_fn(p_data)
-        error_envelope = np.minimum(
-            np.abs(x_data - x_stable_theory),
-            np.abs(x_data - x_unstable_theory)
-        )
-        
-        # 分叉点检测
-        bifurcation_p, bifurcation_x = self._detect_bifurcation_point(
-            df, p_data, x_data, eps_residual
-        )
-        
-        # 绘图
-        plt.figure(figsize=(6.6, 5.0))
-        
-        # 理论曲线
-        theory_mask = p_data <= 0
-        plt.plot(p_data[theory_mask], x_stable_theory[theory_mask], 
-                "k-", alpha=0.7, label="theory stable")
-        plt.plot(p_data[theory_mask], x_unstable_theory[theory_mask], 
-                "k--", alpha=0.7, label="theory unstable")
-        
-        # PINN预测（按稳定性分段绘制）
-        self._plot_stability_segments(p_data, x_data, stability, color="#1f77b4")
-        
-        # 误差带
-        plt.fill_between(p_data, x_data - error_envelope, x_data + error_envelope,
-                        color="#1f77b4", alpha=0.18, label="|error| band")
-        
-        # 分叉点标记
-        plt.scatter([bifurcation_p], [bifurcation_x], 
-                   s=self.config.MARKER_SIZE, edgecolors='k',
-                   facecolors='none', zorder=3, label="bifurcation")
-        
-        # 参考线
-        plt.axvline(0.0, color="0.7", linestyle=":", linewidth=1)
-        
-        plt.xlabel("p")
-        plt.ylabel("x")
-        plt.title("Fig.4.1(a) Learned (x,p) vs theory (stable solid / unstable dashed)")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
-        plt.close()
-    
-    def _detect_bifurcation_point(self, df: pd.DataFrame, p_data: np.ndarray, 
-                                x_data: np.ndarray, eps_residual: float) -> Tuple[float, float]:
-        """检测分叉点位置"""
-        # 方法1：寻找x的零点交叉
-        valid_mask = np.ones_like(x_data, dtype=bool)
+        p_col = DataLoader.find_column(df, ["p", "p_0", "p0"])
+        x_col = DataLoader.find_column(df, ["x", "x_0", "x0"])
+        p, x = df[p_col].values, df[x_col].values
+        stability = df["stable"].astype(bool).values if "stable" in df.columns else (x < 0)
+
+        # theory
+        x_stable_theory, x_unstable_theory = theory_fn(p)
+        err_band = np.minimum(np.abs(x - x_stable_theory), np.abs(x - x_unstable_theory))
+
+        # detect bifurcation (x crosses 0 under small residual)
+        valid = np.ones_like(x, dtype=bool)
         if "res" in df.columns:
-            valid_mask &= (np.abs(df["res"].values) < eps_residual)
-        
-        zero_crossing_indices = np.where(
-            (np.sign(x_data[1:]) * np.sign(x_data[:-1]) <= 0) & 
-            valid_mask[1:] & valid_mask[:-1]
-        )[0]
-        
-        if len(zero_crossing_indices) > 0:
-            # 线性插值找零点
-            i = zero_crossing_indices[np.argmin(np.abs(x_data[zero_crossing_indices]))]
-            x0, x1 = x_data[i], x_data[i + 1]
-            p0, p1 = p_data[i], p_data[i + 1]
-            
-            if abs(x1 - x0) > 1e-12:
-                bifurcation_p = p0 + (0 - x0) * (p1 - p0) / (x1 - x0)
-                bifurcation_x = 0.0
-            else:
-                bifurcation_p, bifurcation_x = p0, x0
+            valid &= (np.abs(df["res"].values) < eps_residual)
+        idx = np.where((np.sign(x[1:]) * np.sign(x[:-1]) <= 0) & valid[1:] & valid[:-1])[0]
+        if len(idx) > 0:
+            i = idx[np.argmin(np.abs(x[idx]))]
+            x0, x1, p0, p1 = x[i], x[i+1], p[i], p[i+1]
+            bif_p = p0 + (0 - x0) * (p1 - p0) / (x1 - x0 + 1e-12)
+            bif_x = 0.0
         else:
-            # 方法2：选择最小奇异值最小的点
-            if "sigma_min" in df.columns:
-                candidates = np.where(valid_mask)[0]
-                if len(candidates) > 0:
-                    j = candidates[np.argmin(df["sigma_min"].values[candidates])]
-                else:
-                    j = np.argmin(df["sigma_min"].values)
-            else:
-                candidates = np.where(valid_mask)[0]
-                if len(candidates) > 0:
-                    j = candidates[np.argmin(np.abs(x_data[candidates]))]
-                else:
-                    j = np.argmin(np.abs(x_data))
-            
-            bifurcation_p, bifurcation_x = p_data[j], x_data[j]
-        
-        return bifurcation_p, bifurcation_x
-    
-    def _plot_stability_segments(self, p_data: np.ndarray, x_data: np.ndarray, 
-                               stability: np.ndarray, color: str = "#1f77b4"):
-        """按稳定性分段绘制曲线"""
-        start_idx = 0
-        
-        for end_idx in range(1, len(x_data) + 1):
-            if end_idx == len(x_data) or stability[end_idx] != stability[end_idx - 1]:
-                # 绘制当前段
-                linestyle = "-" if stability[end_idx - 1] else "--"
-                label = "PINN" if start_idx == 0 else None
-                
-                plt.plot(p_data[start_idx:end_idx], x_data[start_idx:end_idx], 
-                        linestyle, color=color, label=label)
-                start_idx = end_idx
-    
-    def generate_case1_metrics_report(self, csv_path: str, theory_fn: Callable, 
-                                    output_path: str, max_residual_threshold: float = 1e-3,
-                                    mae_threshold: float = 1e-2, 
-                                    arc_error_threshold: float = 5e-3):
-        """生成Case1的指标报告"""
+            j = np.argmin(np.abs(x))
+            bif_p, bif_x = p[j], x[j]
+
+        # plot
+        plt.figure(figsize=(6.6, 5.0))
+        mask = p <= 0
+        plt.plot(p[mask], x_stable_theory[mask], "k-", alpha=0.7, label="theory stable")
+        plt.plot(p[mask], x_unstable_theory[mask], "k--", alpha=0.7, label="theory unstable")
+        self._plot_stability_segments(p, x, stability)
+        plt.fill_between(p, x - err_band, x + err_band, alpha=0.18, label="|error| band")
+        plt.scatter([bif_p], [bif_x], s=self.config.MARKER_SIZE, edgecolors='k',
+                    facecolors='none', zorder=3, label="bifurcation")
+        plt.axvline(0.0, color="0.7", linestyle=":", linewidth=1)
+        plt.xlabel("p"); plt.ylabel("x")
+        plt.title("Fig.4.1(a) Learned (x,p) vs theory")
+        plt.legend(); plt.tight_layout()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path, dpi=self.config.FIG_DPI); plt.close()
+
+    def _plot_stability_segments(self, p: np.ndarray, x: np.ndarray, st: np.ndarray):
+        start = 0
+        while start < len(x):
+            end = start + 1
+            while end < len(x) and st[end] == st[start]:
+                end += 1
+            ls = "-" if st[start] else "--"
+            lbl = "PINN" if start == 0 else None
+            plt.plot(p[start:end], x[start:end], ls, label=lbl)
+            start = end
+
+    def generate_case1_metrics_report(self, csv_path: str, theory_fn: Callable, output_path: str,
+                                      max_residual_threshold: float = 1e-3,
+                                      mae_threshold: float = 1e-2,
+                                      arc_error_threshold: float = 5e-3):
         df = DataLoader.load_branch_data(csv_path)
-        
-        p_col = DataLoader.find_column(df, ["p", "p1", "p_0", "p0"])
-        x_col = DataLoader.find_column(df, ["x", "x1", "x_0", "x0"])
-        
-        p_data = df[p_col].values
-        x_data = df[x_col].values
-        residual_data = df["res"].values if "res" in df.columns else np.full_like(p_data, np.nan)
-        arc_error_data = df["arc_err"].values if "arc_err" in df.columns else np.full_like(p_data, np.nan)
-        
-        # 计算指标
-        x_stable_theory, x_unstable_theory = theory_fn(p_data)
-        mae = np.mean(np.minimum(
-            np.abs(x_data - x_stable_theory),
-            np.abs(x_data - x_unstable_theory)
-        ))
-        
-        max_residual = np.nanmax(np.abs(residual_data))
-        mean_arc_error = np.nanmean(arc_error_data)
-        
-        # 写入报告
+        p_col = DataLoader.find_column(df, ["p", "p_0", "p0"])
+        x_col = DataLoader.find_column(df, ["x", "x_0", "x0"])
+        p, x = df[p_col].values, df[x_col].values
+        res = df["res"].values if "res" in df.columns else np.full_like(p, np.nan)
+        arc = df["arc_err"].values if "arc_err" in df.columns else np.full_like(p, np.nan)
+        x_s, x_u = theory_fn(p)
+        mae = np.mean(np.minimum(np.abs(x - x_s), np.abs(x - x_u)))
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write(f"max|F| = {max_residual:.3e}  (target ≤ {max_residual_threshold:.1e})\n")
+            f.write(f"max|F| = {np.nanmax(np.abs(res)):.3e}  (target ≤ {max_residual_threshold:.1e})\n")
             f.write(f"MAE(x_pred, x_true_near) = {mae:.3e}  (target ≤ {mae_threshold:.1e})\n")
-            f.write(f"mean arc-length error = {mean_arc_error:.3e}  (target ≤ {arc_error_threshold:.1e})\n")
-    
-    # ========= Case 2: 跨临界分叉 =========
-    
-    def plot_case2_two_branches(self, csv_path: str, output_path: str, theory_fn: Callable,
-                              inset_range: Tuple[float, float, float, float] = (-0.2, 0.2, -0.2, 0.2)):
-        """Case2双分支图with插图 - 修复版本"""
-        from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
-        
-        df = DataLoader.load_branch_data(csv_path)
-        p_col = DataLoader.find_column(df, ["p", "p_0", "p1"])
-        x_col = DataLoader.find_column(df, ["x", "x_0", "x1"])
-        stability_col = DataLoader.find_column(df, ["stable"])
-        
-        p_data = df[p_col].values
-        x_data = df[x_col].values
-        stability = df[stability_col].astype(bool).values
-        
-        # 理论解 - 跨临界分叉的两个分支
-        p_theory = np.linspace(p_data.min(), p_data.max(), 200)
-        x_branch1 = np.zeros_like(p_theory)  # x = 0 分支
-        x_branch2 = p_theory.copy()          # x = p 分支
-        
-        plt.figure(figsize=(6.8, 5.0))
-        
-        # PINN学到的轨迹（按稳定性标记）
-        self._plot_stability_segments(p_data, x_data, stability, color="#1f77b4")
-        
-        # 理论分支
-        plt.plot(p_theory, x_branch1, "k-", alpha=0.7, linewidth=2, label="Theory: x=0")
-        plt.plot(p_theory, x_branch2, "k--", alpha=0.7, linewidth=2, label="Theory: x=p")
-        
-        # 插图显示原点附近的细节
-        ax_main = plt.gca()
-        axins = inset_axes(ax_main, width="40%", height="40%", loc="upper left")
-        
-        # 在插图中绘制相同内容但放大原点区域
-        axins.plot(p_data, x_data, "-", color="#1f77b4", linewidth=1.5)
-        axins.plot(p_theory, x_branch1, "k-", alpha=0.7, linewidth=1.5)
-        axins.plot(p_theory, x_branch2, "k--", alpha=0.7, linewidth=1.5)
-        
-        # 设置插图范围聚焦原点
-        x1, x2, y1, y2 = inset_range
-        axins.set_xlim(x1, x2)
-        axins.set_ylim(y1, y2)
-        axins.grid(True, alpha=0.3)
-        mark_inset(ax_main, axins, loc1=2, loc2=4, fc="none", ec="0.5")
-        
-        # 标记分叉点
-        plt.scatter([0], [0], s=self.config.MARKER_SIZE, 
-                   edgecolors='red', facecolors='none', 
-                   zorder=5, linewidth=2, label="Bifurcation point")
-        
-        plt.xlabel("p (parameter)")
-        plt.ylabel("x (state)")
-        plt.title("Fig.4.2(a) Transcritical bifurcation: Learned trajectory vs theoretical branches")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+            f.write(f"mean arc-length error = {np.nanmean(arc):.3e}  (target ≤ {arc_error_threshold:.1e})\n")
+
+    # ===== Case 2: single paper-ready outlet (overview + zoom) =====
+    def plot_case2_master(
+        self,
+        csv_paths: List[str],
+        output_path: str,
+        theory_fn: Callable,   # 兼容签名，不实际依赖
+        zoom_range: Tuple[float, float, float, float] = (-0.3, 0.3, -0.3, 0.3),
+        title: str = "Case 2: Transcritical bifurcation (stable=solid, unstable=dashed)",
+    ) -> None:
+        # ------- 收集数据 -------
+        branches, p_min, p_max = [], None, None
+        for path in csv_paths:
+            if not os.path.exists(path):
+                continue
+            df = pd.read_csv(path)
+
+            # 兼容列名
+            if "p_0" in df.columns: p = df["p_0"].values
+            elif "p" in df.columns:  p = df["p"].values
+            else: raise KeyError(f"{path} 缺少列 p_0/p")
+
+            if "x_0" in df.columns: x = df["x_0"].values
+            elif "x" in df.columns:  x = df["x"].values
+            else: raise KeyError(f"{path} 缺少列 x_0/x")
+
+            if "stable" in df.columns:
+                st = df["stable"].astype(bool).values
+            else:
+                st = (p - 2.0 * x) < 0.0  # 跨临界兜底
+
+            branches.append({"p": p, "x": x, "st": st, "label": os.path.basename(path), "df": df})
+            p_min = p.min() if p_min is None else min(p_min, p.min())
+            p_max = p.max() if p_max is None else max(p_max, p.max())
+
+        if not branches:
+            raise FileNotFoundError("No valid CSV for Case2 master plot")
+
+        # 理论曲线
+        p_lo = p_min if p_min is not None else -2.0
+        p_hi = p_max if p_max is not None else  2.0
+        p_theory = np.linspace(p_lo, p_hi, 600)
+        mask_neg = p_theory < 0
+        mask_pos = ~mask_neg
+
+        def _draw(ax, focus: bool):
+            # 理论：x=0
+            ax.plot(p_theory[mask_neg], np.zeros_like(p_theory[mask_neg]), "k-",  lw=2.0, alpha=0.8, label="theory x=0 (stable)")
+            ax.plot(p_theory[mask_pos], np.zeros_like(p_theory[mask_pos]), "k--", lw=2.0, alpha=0.8, label="theory x=0 (unstable)")
+            # 理论：x=p
+            ax.plot(p_theory[mask_pos], p_theory[mask_pos], "k-",  lw=2.0, alpha=0.8, label="theory x=p (stable)")
+            ax.plot(p_theory[mask_neg], p_theory[mask_neg], "k--", lw=2.0, alpha=0.8, label="theory x=p (unstable)")
+
+            # PINN（按稳定性分段线型）
+            palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#8c564b"]
+            for i, br in enumerate(branches):
+                p, x, st = br["p"], br["x"], br["st"]
+                c = palette[i % len(palette)]
+                start, first_label = 0, f"PINN #{i+1}"
+                while start < len(p):
+                    end = start + 1
+                    while end < len(p) and st[end] == st[start]:
+                        end += 1
+                    ls = "-" if st[start] else "--"
+                    lbl = first_label; first_label = None
+                    ax.plot(p[start:end], x[start:end], ls, color=c, lw=2.0, label=lbl)
+                    start = end
+
+            # (0,0)
+            ax.scatter([0.0], [0.0], s=self.config.MARKER_SIZE, edgecolors="red",
+                       facecolors="none", linewidth=2, zorder=5, label="Bifurcation (0,0)")
+            ax.axvline(0.0, color="0.7", lw=1.0, alpha=0.6)
+
+            if focus:
+                x1, x2, y1, y2 = zoom_range
+                ax.set_xlim(x1, x2)
+                ax.set_ylim(y1, y2)
+            else:
+                ax.set_xlim(p_lo, p_hi)
+                # 自动 y 范围：用所有分支的 2%~98% 分位，避免离群点
+                all_x = np.concatenate([br["x"] for br in branches])
+                y_lo, y_hi = np.quantile(all_x, [0.02, 0.98])
+                if not np.isfinite(y_lo) or not np.isfinite(y_hi) or (y_hi - y_lo) < 1e-10:
+                    y_lo, y_hi = float(np.min(all_x)), float(np.max(all_x))
+                pad = 0.08 * max(1e-8, (y_hi - y_lo))
+                ax.set_ylim(y_lo - pad, y_hi + pad)
+
+            ax.grid(True, alpha=0.25)
+            ax.set_xlabel("p"); ax.set_ylabel("x")
+
+        # ------- 主图（全范围） -------
+        plt.figure(figsize=(9.0, 5.8))
+        ax = plt.gca()
+        _draw(ax, focus=False)
+        ax.set_title(title, pad=8)
+        ax.legend(loc="best", frameon=True)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
+        plt.savefig(output_path, dpi=self.config.FIG_DPI, bbox_inches="tight")
         plt.close()
-    
-    def plot_case2_tangent_consistency(self, csv_path: str, output_path: str):
-        """Case2切向量一致性"""
-        df = DataLoader.load_branch_data(csv_path)
-        s_col = DataLoader.find_column(df, ["s"])
-        
-        if "tangent_cos" not in df.columns:
-            raise KeyError("Column 'tangent_cos' not found in CSV")
-        
-        plt.figure(figsize=(6.6, 5.0))
-        plt.plot(df[s_col], df["tangent_cos"], "-", color="#1f77b4")
-        plt.xlabel("s")
-        plt.ylabel("cos(t_i, t_{i-1})")
-        plt.title("Fig.4.2(b) Tangent consistency vs s")
+
+        # ------- 放大图（zoom_range） -------
+        zoom_path = os.path.splitext(output_path)[0] + "_zoom.png"
+        plt.figure(figsize=(7.2, 5.4))
+        axz = plt.gca()
+        _draw(axz, focus=True)
+        axz.set_title(title + " — zoomed", pad=8)
+
+        # 放大图里加个指标小卡片（用第一条分支即可）
+        df0 = branches[0]["df"]
+        p0 = df0["p_0"].values if "p_0" in df0.columns else df0["p"].values
+        x0 = df0["x_0"].values if "x_0" in df0.columns else df0["x"].values
+        err_near = np.minimum(np.abs(x0), np.abs(x0 - p0))
+        win = np.abs(p0) <= 0.2
+        if win.any():
+            pw, xw = p0[win], x0[win]
+            p_at_x0 = float(pw[np.argmin(np.abs(xw))])
+            x_at_p0 = float(xw[np.argmin(np.abs(xw - pw))])
+        else:
+            p_at_x0 = float(p0[np.argmin(np.abs(x0))])
+            x_at_p0 = float(x0[np.argmin(np.abs(x0 - p0))])
+        txt = f"MAE to nearest: {np.mean(err_near):.2e}\n" \
+              f"p* error: {abs(p_at_x0):.2e}\n" \
+              f"x* error: {abs(x_at_p0):.2e}"
+        if "res" in df0.columns: txt += f"\nmax |F|: {df0['res'].abs().max():.2e}"
+        if "arc_err" in df0.columns: txt += f"\nmean arc err: {np.nanmean(df0['arc_err'].values):.2e}"
+        axz.text(0.98, 0.02, txt, transform=axz.transAxes, ha="right", va="bottom",
+                 fontsize=self.config.FONT_SIZE - 1,
+                 bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="0.6", alpha=0.95))
+        axz.legend(loc="best", frameon=True)
         plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
+        plt.savefig(zoom_path, dpi=self.config.FIG_DPI, bbox_inches="tight")
         plt.close()
-    def plot_case2_autospawn_results(self, branch_results: List[Dict], 
-                                output_path: str, theory_fn: Callable):
-        """绘制Case2自动派生结果"""
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    
-        # 子图1: 分岔图主结果
-        ax1 = axes[0, 0]
-    
-        # 理论分支
-        p_theory = np.linspace(-1.5, 1.5, 300)
-        ax1.plot(p_theory, np.zeros_like(p_theory), 'k--', alpha=0.3, label='Theory: x=0')
-        ax1.plot(p_theory, p_theory, 'k--', alpha=0.3, label='Theory: x=p')
-    
-        # 绘制每个分支
-        colors = ['blue', 'red', 'green']
-        for i, branch_data in enumerate(branch_results):
-            df = pd.read_csv(branch_data['csv_path'])
-            p_data = df['p_0'].values
-            x_data = df['x_0'].values
-        
-            label = branch_data['name'].capitalize()
-            ax1.plot(p_data, x_data, '-', color=colors[i], 
-                    label=label, linewidth=2, alpha=0.8)
-        
-            # 标记初始点
-            y0 = branch_data['initial_condition']
-            ax1.plot(y0[-1], y0[0], 'o', color=colors[i], markersize=8)
-    
-        # 标记分岔点
-        ax1.plot(0, 0, 'ko', markersize=10, label='Bifurcation')
-    
-        ax1.set_xlabel('Parameter p')
-        ax1.set_ylabel('State x')
-        ax1.set_title('Transcritical Bifurcation with Auto-spawn')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.set_xlim(-1.5, 1.5)
-        ax1.set_ylim(-1.0, 1.5)
-    
-        # 子图2: 物理残差
-        ax2 = axes[0, 1]
-        for i, branch_data in enumerate(branch_results):
-            df = pd.read_csv(branch_data['csv_path'])
-            s_data = df['s'].values
-            res_data = df['res'].values if 'res' in df.columns else df['residual'].values
-        
-            ax2.semilogy(s_data, np.abs(res_data), '-', 
-                        color=colors[i], label=branch_data['name'].capitalize())
-    
-        ax2.set_xlabel('Arc length s')
-        ax2.set_ylabel('Physics residual')
-        ax2.set_title('Residual Evolution')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-    
-        # 子图3: 切向量一致性
-        ax3 = axes[1, 0]
-        for i, branch_data in enumerate(branch_results):
-            df = pd.read_csv(branch_data['csv_path'])
-            if 'tangent_cos' in df.columns:
-                s_data = df['s'].values
-                cos_data = df['tangent_cos'].values
-            
-                ax3.plot(s_data, cos_data, '-', color=colors[i], 
-                        label=branch_data['name'].capitalize(), alpha=0.7)
-    
-        ax3.axhline(y=0.7, color='red', linestyle='--', alpha=0.3, label='Threshold')
-        ax3.set_xlabel('Arc length s')
-        ax3.set_ylabel('cos(t_i, t_{i-1})')
-        ax3.set_title('Tangent Consistency (Spawn Trigger)')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
-    
-        # 子图4: 性能指标表格
-        ax4 = axes[1, 1]
-        ax4.axis('tight')
-        ax4.axis('off')
-    
-        # 计算指标
-        metrics_data = []
-        for branch_data in enumerate(branch_results):
-            df = pd.read_csv(branch_data['csv_path'])
-            metrics = {
-                'Branch': branch_data['name'].capitalize(),
-                'Points': len(df),
-                'Max |F|': f"{df['res'].max():.2e}" if 'res' in df.columns else 'N/A',
-                'Mean arc err': f"{df['arc_err'].mean():.2e}" if 'arc_err' in df.columns else 'N/A'
-            }
-            metrics_data.append(list(metrics.values()))
-    
-        table = ax4.table(cellText=metrics_data,
-                          colLabels=['Branch', 'Points', 'Max |F|', 'Mean arc err'],
-                          loc='center',
-                          cellLoc='center')
-        table.auto_set_font_size(False)
-        table.set_fontsize(10)
-        table.scale(1, 1.5)
-        ax4.set_title('Performance Metrics')
-    
-        plt.suptitle('Case 2: Transcritical Bifurcation with Auto-spawn Framework', 
-                fontsize=14, fontweight='bold')
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
-        plt.close() 
-    # ========= Case 3: Hopf分叉 =========
-    
+
+    # ===== Case 3: Hopf amplitude =====
     def plot_case3_amplitude_curve(self, csv_path: str, output_path: str, theory_fn: Callable):
-        """Case3幅值曲线r(μ)"""
         df = DataLoader.load_branch_data(csv_path)
-        p_col = DataLoader.find_column(df, ["p", "p1", "p_0", "p0"])
-        x_col = DataLoader.find_column(df, ["x", "x1", "x_0", "x0"])
-        
-        mu_data = df[p_col].values
-        r_data = df[x_col].values
-        r_theory = theory_fn(mu_data)
-        
-        error = np.abs(r_data - r_theory)
-        
+        p_col = DataLoader.find_column(df, ["p", "p_0", "p0"])
+        x_col = DataLoader.find_column(df, ["x", "x_0", "x0"])
+        mu, r = df[p_col].values, df[x_col].values
+        r_th = theory_fn(mu)
+        err = np.abs(r - r_th)
         plt.figure(figsize=(6.6, 5.0))
-        
-        # 理论曲线和PINN预测
-        plt.plot(mu_data, r_theory, "k--", alpha=0.7, label="theory r(μ)")
-        plt.plot(mu_data, r_data, "-", color="#1f77b4", label="PINN")
-        
-        # 误差带
-        plt.fill_between(mu_data, r_data - error, r_data + error,
-                        alpha=0.2, color="#1f77b4", label="|error| band")
-        
-        plt.xlabel("μ")
-        plt.ylabel("r")
-        plt.title("Fig.4.3(a) r(μ) learned vs theory")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
-        plt.close()
-    
+        plt.plot(mu, r_th, "k--", alpha=0.7, label="theory r(μ)")
+        plt.plot(mu, r, "-", label="PINN")
+        plt.fill_between(mu, r - err, r + err, alpha=0.2, label="|error| band")
+        plt.xlabel("μ"); plt.ylabel("r"); plt.title("Fig.4.3(a) r(μ) learned vs theory")
+        plt.legend(); plt.tight_layout()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path, dpi=self.config.FIG_DPI); plt.close()
+
     def plot_case3_curvature_distribution(self, csv_path: str, output_path: str):
-        """Case3曲率分布"""
         df = DataLoader.load_branch_data(csv_path)
         s_col = DataLoader.find_column(df, ["s"])
-        
         if "curv" not in df.columns:
-            raise KeyError("Column 'curv' not found in CSV")
-        
+            raise KeyError("Column 'curv' not found")
         plt.figure(figsize=(6.6, 5.0))
-        plt.plot(df[s_col], df["curv"], "-", color="#1f77b4")
-        plt.xlabel("s")
-        plt.ylabel("||y''||")
-        plt.title("Fig.4.3(b) Curvature distribution")
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
-        plt.close()
-    
-    # ========= 兼容性别名 =========
-    # 保持与原代码的接口兼容性
-    
-    def plot_losses(self, history: list, output_path: str, title: str = "Training losses"):
-        """兼容性别名"""
+        plt.plot(df[s_col], df["curv"], "-")
+        plt.xlabel("s"); plt.ylabel("||y''||"); plt.title("Fig.4.3(b) Curvature distribution")
+        plt.tight_layout(); os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path, dpi=self.config.FIG_DPI); plt.close()
+
+    # ===== Compatibility aliases =====
+    def plot_losses(self, history: List[Dict], output_path: str, title: str = "Training losses"):
         self.plot_training_curves(history, output_path, title)
-    
-    def fig_case1_px_publication(self, csv_path: str, output_path: str, theory_fn: Callable, 
-                               eps_r: float = 1e-3):
-        """兼容性别名"""
+
+    def fig_case1_px_publication(self, csv_path: str, output_path: str, theory_fn: Callable, eps_r: float = 1e-3):
         self.plot_case1_bifurcation_diagram(csv_path, output_path, theory_fn, eps_r)
-    
+
     def report_case1_metrics(self, csv_path: str, theory_fn: Callable, output_path: str,
-                           max_res_ok: float = 1e-3, mae_ok: float = 1e-2, 
-                           mean_arc_ok: float = 5e-3):
-        """兼容性别名"""
-        self.generate_case1_metrics_report(csv_path, theory_fn, output_path, 
-                                         max_res_ok, mae_ok, mean_arc_ok)
-    
-    def fig_case2_px_with_two_branches(self, csv_path: str, output_path: str, theory_fn: Callable,
-                                     inset_range: Tuple[float, float, float, float] = (-0.2, 0.2, -0.2, 0.2)):
-        """兼容性别名"""
-        self.plot_case2_two_branches(csv_path, output_path, theory_fn, inset_range)
-    
-    def fig_case2_tangent_cos(self, csv_path: str, output_path: str):
-        """兼容性别名"""
-        self.plot_case2_tangent_consistency(csv_path, output_path)
-    
+                             max_res_ok: float = 1e-3, mae_ok: float = 1e-2, mean_arc_ok: float = 5e-3):
+        self.generate_case1_metrics_report(csv_path, theory_fn, output_path, max_res_ok, mae_ok, mean_arc_ok)
+
     def fig_case3_r_mu(self, csv_path: str, output_path: str, theory_fn: Callable):
-        """兼容性别名"""
         self.plot_case3_amplitude_curve(csv_path, output_path, theory_fn)
-    
+
     def fig_case3_curvature(self, csv_path: str, output_path: str):
-        """兼容性别名"""
         self.plot_case3_curvature_distribution(csv_path, output_path)
-    
+
     def plot_arcerr_vs_s(self, csv_path: str, output_path: str):
-        """兼容性别名"""
         self.plot_arc_length_error_vs_s(csv_path, output_path)
-    
-    # ========= 新增：方法对比和分析功能 =========
-    
-    def plot_method_comparison(self, results_dict: Dict, output_path: str):
-        """绘制方法对比图"""
-        methods = list(results_dict.keys())
-        metrics = ["max_residual", "mean_branch_distance", "stability_accuracy"]
-        
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        
-        for i, metric in enumerate(metrics):
-            if all(metric in results_dict[method]["metrics"] for method in methods):
-                values = [results_dict[method]["metrics"][metric] for method in methods]
-                axes[i].bar(methods, values)
-                axes[i].set_title(metric.replace("_", " ").title())
-                if 'residual' in metric:
-                    axes[i].set_yscale('log')
-        
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
-        plt.close()
-    
-    def plot_convergence_analysis(self, history_list: list, labels: list, output_path: str):
-        """绘制多个方法的收敛对比"""
-        plt.figure(figsize=(10, 6))
-        
-        for history, label in zip(history_list, labels):
-            iterations = range(len(history))
-            total_losses = [h["total"] for h in history]
-            plt.semilogy(iterations, total_losses, label=label, linewidth=2)
-        
-        plt.xlabel("Iteration")
-        plt.ylabel("Total Loss")
-        plt.title("Training Convergence Comparison")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=self.config.FIG_DPI)
-        plt.close()

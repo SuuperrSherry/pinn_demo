@@ -1,0 +1,25 @@
+Case2 Method Metrics
+==================================================
+n_points: 6.000e+02
+p_min: -8.960e+00
+p_max: 5.011e-02
+p_range: 9.010e+00
+x_min: -7.695e-04
+x_max: 4.283e-02
+mae_to_nearest_theory: 3.490e-03
+max_error_to_theory: 4.054e-02
+mae_x0_branch_negative_p: 3.387e-03
+mae_xp_branch_positive_p: 1.881e-02
+bifurcation_p_error: 1.944e-01
+bifurcation_x_error: 4.283e-02
+bifurcation_distance: 1.991e-01
+mean_residual: 4.326e-03
+median_residual: 3.614e-03
+residual_p50: 3.614e-03
+residual_p90: 8.748e-03
+max_residual: 1.154e-02
+mean_arc_error: 1.324e-03
+max_arc_error: 7.678e-03
+stability_accuracy: nan
+mean_tangent_cos: 1.000e+00
+min_tangent_cos: 1.000e+00
